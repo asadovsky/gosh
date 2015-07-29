@@ -39,5 +39,14 @@ func TestEnv(t *testing.T) {
 	eq(t, env(sh), "BAR=6")
 }
 
+func TestEnvSort(t *testing.T) {
+	sh, cleanup := gosh.New()
+	defer cleanup()
+	sh.Set("FOO4=4")
+	sh.Set("FOO=bar")
+	sh.Set("FOOD=D")
+	eq(t, env(sh), "FOO=bar FOO4=4 FOOD=D")
+}
+
 func TestHello(t *testing.T) {
 }

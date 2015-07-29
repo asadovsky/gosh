@@ -18,11 +18,7 @@ package gosh
 // - TempFile/TempDir (with cleanup)
 // - BinDir, and facilities for building binaries (e.g. Go binaries)
 
-import (
-	"fmt"
-	"sort"
-	"strings"
-)
+import ()
 
 // Cmd represents a command. Errors typically originate from exec.Cmd.
 type Cmd interface {
@@ -49,9 +45,9 @@ type Shell interface {
 	// Env returns this Shell's env vars, excluding preexisting vars.
 	Env() []string
 
-	// AddArgs updates this Shell to append the given args to all subsequent
+	// AppendArgs configures this Shell to append the given args to all subsequent
 	// commands that it runs.
-	AddArgs(args ...string)
+	AppendArgs(args ...string)
 
 	// Wait waits for all commands started by this Shell to complete. Returns nil
 	// if all commands ran successfully. Otherwise, returns some command's error.
@@ -100,16 +96,12 @@ func (sh *shell) Cmd(name string, args ...string) Cmd {
 }
 
 func (sh *shell) Set(vars ...string) {
-	for _, v := range vars {
-		kv := strings.Split(v, "=")
-		// TODO: If *testing.T was provided, fail test instead of panicking.
-		if len(kv) != 2 {
-			panic(v)
-		}
-		if kv[1] == "" {
-			delete(sh.vars, kv[0])
+	for _, kv := range vars {
+		k, v := SplitKeyValue(kv)
+		if v == "" {
+			delete(sh.vars, k)
 		} else {
-			sh.vars[kv[0]] = kv[1]
+			sh.vars[k] = v
 		}
 	}
 }
@@ -119,15 +111,10 @@ func (sh *shell) Get(name string) string {
 }
 
 func (sh *shell) Env() []string {
-	res := make([]string, 0, len(sh.vars))
-	for k, v := range sh.vars {
-		res = append(res, fmt.Sprintf("%s=%s", k, v))
-	}
-	sort.Strings(res)
-	return res
+	return MapToSlice(sh.vars)
 }
 
-func (sh *shell) AddArgs(args ...string) {
+func (sh *shell) AppendArgs(args ...string) {
 	// FIXME
 }
 
