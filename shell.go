@@ -1,26 +1,23 @@
 package gosh
 
 // TODO:
-// - Provide hooks to access Cmd streams (stdin, stdout, stderr)
-// - Provide mechanism for capturing variables produced by a process, e.g. a
-//   port number
-// - Provide mechanism for processes to signal that they are "ready", e.g. ready
-//   to serve requests
-// - Make it possible to pipe one Cmd's stdout to another's stdin
-// - Kill individual commands
-// - Have commands kill themselves if their parent Shell's process dies
-// - Kill all commands (cleanup routine)
-// - Provide simple "unified binary" mechanism, with a function registry
-// - Provide hooks for "go test"
-// - Provide a means for introspection, to see which commands are running and
-//   ask those commands about themselves
-// - Pushd/Popd
-// - TempFile/TempDir (with cleanup)
-// - BinDir, and facilities for building binaries (e.g. Go binaries)
+// - Mechanism for communicating vars (e.g. port number) from child to parent
+// - Mechanism for child to signal that it is "ready", e.g. to serve requests
+// - Single-binary mechanism, by means of a function registry
+// - Introspection mechanism, e.g. to see which commands are running
 
-import ()
+import (
+	"io/ioutil"
+	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
+)
 
 // Cmd represents a command. Errors typically originate from exec.Cmd.
+// Not thread-safe.
+// TODO: Provide access to streams (stdin, stdout, stderr).
+// TODO: Kill self if parent dies.
 type Cmd interface {
 	// Run starts this command and waits for it to complete.
 	Run() error
@@ -30,8 +27,16 @@ type Cmd interface {
 
 	// Wait waits for this command to complete.
 	Wait() error
+
+	// Kill terminates this command.
+	Kill() error
 }
 
+// Shell represents a shell with an environment (a set of vars).
+// Not thread-safe.
+// TODO: Maybe extract BinDir and BuildGoPkg into an ExtShell interface, to
+// demonstrate how to extend Shell.
+// TODO: Add Pushd/Popd.
 type Shell interface {
 	// Cmd returns a Cmd.
 	Cmd(name string, args ...string) Cmd
@@ -52,47 +57,56 @@ type Shell interface {
 	// Wait waits for all commands started by this Shell to complete. Returns nil
 	// if all commands ran successfully. Otherwise, returns some command's error.
 	Wait() error
+
+	// BuildGoPkg compiles a Go package using the "go build" command and writes
+	// the resulting binary to BinDir(). It returns the absolute path to the
+	// binary.
+	BuildGoPkg(pkg string, flags ...string) (string, error)
+
+	// MakeTempDir creates a new temporary directory in os.TempDir and returns the
+	// path of the new directory.
+	MakeTempDir() (string, error)
+
+	// MakeTempFile creates a new temporary file in os.TempDir, opens the file for
+	// reading and writing, and returns the resulting *os.File.
+	MakeTempFile() (*os.File, error)
 }
 
 // TODO: Take options, e.g. *testing.T and panicOnError.
 func New() (Shell, func()) {
 	sh := &shell{
-		vars: map[string]string{},
-		args: []string{},
+		vars:      map[string]string{},
+		args:      []string{},
+		tempDirs:  []string{},
+		tempFiles: []*os.File{},
 	}
 	return sh, func() {
-		// FIXME
-		// sh.cleanup()
+		sh.cleanup()
 	}
 }
 
 type cmd struct {
-	name string
-	args []string
+	exec.Cmd
+}
+
+func (c *cmd) Kill() error {
+	// FIXME
+	return nil
 }
 
 type shell struct {
-	vars map[string]string
-	args []string
-}
-
-func (c *cmd) Run() error {
-	// FIXME
-	return nil
-}
-
-func (c *cmd) Start() error {
-	// FIXME
-	return nil
-}
-
-func (c *cmd) Wait() error {
-	// FIXME
-	return nil
+	vars      map[string]string
+	args      []string
+	cmds      []*cmd
+	tempDirs  []string
+	tempFiles []*os.File
+	binDir    string
 }
 
 func (sh *shell) Cmd(name string, args ...string) Cmd {
-	return &cmd{name: name, args: args}
+	c := &cmd{Cmd: *exec.Command(name, append(args, sh.args...)...)}
+	sh.cmds = append(sh.cmds, c)
+	return c
 }
 
 func (sh *shell) Set(vars ...string) {
@@ -115,10 +129,83 @@ func (sh *shell) Env() []string {
 }
 
 func (sh *shell) AppendArgs(args ...string) {
-	// FIXME
+	sh.args = append(sh.args, args...)
 }
 
 func (sh *shell) Wait() error {
-	// FIXME
-	return nil
+	var res error
+	for _, cmd := range sh.cmds {
+		if err := cmd.Wait(); err != nil {
+			// TODO: Print warning.
+			res = err
+		}
+	}
+	return res
+}
+
+func (sh *shell) BinDir() string {
+	return sh.binDir
+}
+
+func (sh *shell) BuildGoPkg(pkg string, flags ...string) (string, error) {
+	binPath := filepath.Join(sh.BinDir(), path.Base(pkg))
+	// If this binary has already been built, don't rebuild it.
+	if _, err := os.Stat(binPath); err == nil {
+		return binPath, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	// Build binary to tempBinPath, then move it to binPath.
+	tempDir, err := ioutil.TempDir(sh.BinDir(), "")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tempDir)
+	tempBinPath := filepath.Join(tempDir, path.Base(pkg))
+	args := []string{"build", "-x", "-o", tempBinPath}
+	args = append(args, flags...)
+	args = append(args, pkg)
+	err = sh.Cmd("go", args...).Run()
+	if err != nil {
+		return "", err
+	}
+	if err := os.Rename(tempBinPath, binPath); err != nil {
+		return "", err
+	}
+	return binPath, nil
+}
+
+func (sh *shell) MakeTempDir() (string, error) {
+	name, err := ioutil.TempDir("", "")
+	if err != nil {
+		return "", err
+	}
+	sh.tempDirs = append(sh.tempDirs, name)
+	return name, nil
+}
+
+func (sh *shell) MakeTempFile() (*os.File, error) {
+	f, err := ioutil.TempFile("", "")
+	if err != nil {
+		return nil, err
+	}
+	sh.tempFiles = append(sh.tempFiles, f)
+	return f, nil
+}
+
+func (sh *shell) cleanup() {
+	// TODO: Stop or kill all running processes.
+	for _, tempDir := range sh.tempDirs {
+		if err := os.RemoveAll(tempDir); err != nil {
+			// TODO: Print warning.
+		}
+	}
+	for _, tempFile := range sh.tempFiles {
+		if err := tempFile.Close(); err != nil {
+			// TODO: Print warning.
+		}
+		if err := os.RemoveAll(tempFile.Name()); err != nil {
+			// TODO: Print warning.
+		}
+	}
 }
