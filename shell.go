@@ -1,8 +1,6 @@
 package gosh
 
 // TODO:
-// - Mechanism for communicating vars (e.g. port number) from child to parent
-// - Mechanism for child to signal that it is "ready", e.g. to serve requests
 // - Single-binary mechanism, by means of a function registry
 // - Introspection mechanism, e.g. to see which commands are running
 
@@ -21,7 +19,6 @@ import (
 // Cmd represents a command. Errors typically originate from exec.Cmd.
 // Not thread-safe.
 // TODO: Provide access to streams (stdin, stdout, stderr).
-// TODO: Kill self if parent dies.
 type Cmd interface {
 	// Run starts this command and waits for it to complete.
 	Run() error
