@@ -2,15 +2,32 @@ package gosh_test
 
 import (
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"testing"
 
 	"github.com/asadovsky/gosh"
 )
 
+func Fatal(t *testing.T, args ...interface{}) {
+	debug.PrintStack()
+	t.Fatal(args...)
+}
+
+func Fatalf(t *testing.T, format string, args ...interface{}) {
+	debug.PrintStack()
+	t.Fatalf(format, args...)
+}
+
+func ok(t *testing.T, err error) {
+	if err != nil {
+		Fatal(t, err)
+	}
+}
+
 func eq(t *testing.T, got, want interface{}) {
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v, want %v", got, want)
+		Fatalf(t, "got %v, want %v", got, want)
 	}
 }
 
@@ -19,7 +36,7 @@ func env(sh gosh.Shell) string {
 }
 
 func TestEnv(t *testing.T) {
-	sh, cleanup := gosh.New()
+	sh, cleanup, _ := gosh.New(gosh.ShellOpts{T: t})
 	defer cleanup()
 	eq(t, sh.Get("FOO"), "")
 	eq(t, env(sh), "")
@@ -40,7 +57,7 @@ func TestEnv(t *testing.T) {
 }
 
 func TestEnvSort(t *testing.T) {
-	sh, cleanup := gosh.New()
+	sh, cleanup, _ := gosh.New(gosh.ShellOpts{T: t})
 	defer cleanup()
 	sh.Set("FOO4=4")
 	sh.Set("FOO=bar")

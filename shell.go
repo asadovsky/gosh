@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime/debug"
+	"testing"
 )
 
 // Cmd represents a command. Errors typically originate from exec.Cmd.
@@ -72,20 +74,33 @@ type Shell interface {
 	MakeTempFile() (*os.File, error)
 }
 
-// TODO: Take options, e.g. *testing.T and panicOnError.
-func New() (Shell, func()) {
+// ShellOpts configures Shell.
+type ShellOpts struct {
+	// If not nil, all errors trigger T.Fatal.
+	T *testing.T
+	// If true, all errors trigger panic.
+	PanicOnError bool
+}
+
+// New returns a new Shell.
+func New(opts ShellOpts) (Shell, func(), error) {
 	sh := &shell{
+		opts:      opts,
 		vars:      map[string]string{},
 		args:      []string{},
+		cmds:      []*cmd{},
 		tempDirs:  []string{},
 		tempFiles: []*os.File{},
 	}
-	return sh, func() {
-		sh.cleanup()
+	var err error
+	if sh.binDir, err = sh.MakeTempDir(); err != nil {
+		return nil, nil, sh.err(err)
 	}
+	return sh, sh.cleanup, nil
 }
 
 type cmd struct {
+	// TODO: Maybe wrap exec.Cmd instead of embedding it.
 	exec.Cmd
 }
 
@@ -95,12 +110,26 @@ func (c *cmd) Kill() error {
 }
 
 type shell struct {
+	opts      ShellOpts
 	vars      map[string]string
 	args      []string
 	cmds      []*cmd
 	tempDirs  []string
 	tempFiles []*os.File
 	binDir    string
+}
+
+func (sh *shell) err(err error) error {
+	if err != nil {
+		if sh.opts.T != nil {
+			debug.PrintStack()
+			sh.opts.T.Fatal(err)
+		}
+		if sh.opts.PanicOnError {
+			panic(err)
+		}
+	}
+	return err
 }
 
 func (sh *shell) Cmd(name string, args ...string) Cmd {
@@ -153,12 +182,12 @@ func (sh *shell) BuildGoPkg(pkg string, flags ...string) (string, error) {
 	if _, err := os.Stat(binPath); err == nil {
 		return binPath, nil
 	} else if !os.IsNotExist(err) {
-		return "", err
+		return "", sh.err(err)
 	}
 	// Build binary to tempBinPath, then move it to binPath.
 	tempDir, err := ioutil.TempDir(sh.BinDir(), "")
 	if err != nil {
-		return "", err
+		return "", sh.err(err)
 	}
 	defer os.RemoveAll(tempDir)
 	tempBinPath := filepath.Join(tempDir, path.Base(pkg))
@@ -167,10 +196,10 @@ func (sh *shell) BuildGoPkg(pkg string, flags ...string) (string, error) {
 	args = append(args, pkg)
 	err = sh.Cmd("go", args...).Run()
 	if err != nil {
-		return "", err
+		return "", sh.err(err)
 	}
 	if err := os.Rename(tempBinPath, binPath); err != nil {
-		return "", err
+		return "", sh.err(err)
 	}
 	return binPath, nil
 }
@@ -178,7 +207,7 @@ func (sh *shell) BuildGoPkg(pkg string, flags ...string) (string, error) {
 func (sh *shell) MakeTempDir() (string, error) {
 	name, err := ioutil.TempDir("", "")
 	if err != nil {
-		return "", err
+		return "", sh.err(err)
 	}
 	sh.tempDirs = append(sh.tempDirs, name)
 	return name, nil
@@ -187,7 +216,7 @@ func (sh *shell) MakeTempDir() (string, error) {
 func (sh *shell) MakeTempFile() (*os.File, error) {
 	f, err := ioutil.TempFile("", "")
 	if err != nil {
-		return nil, err
+		return nil, sh.err(err)
 	}
 	sh.tempFiles = append(sh.tempFiles, f)
 	return f, nil
