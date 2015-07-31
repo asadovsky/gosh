@@ -1,6 +1,8 @@
 package gosh_test
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime/debug"
 	"strings"
@@ -9,25 +11,37 @@ import (
 	"github.com/asadovsky/gosh"
 )
 
-func Fatal(t *testing.T, args ...interface{}) {
+func fatal(t *testing.T, args ...interface{}) {
 	debug.PrintStack()
 	t.Fatal(args...)
 }
 
-func Fatalf(t *testing.T, format string, args ...interface{}) {
+func fatalf(t *testing.T, format string, args ...interface{}) {
 	debug.PrintStack()
 	t.Fatalf(format, args...)
 }
 
 func ok(t *testing.T, err error) {
 	if err != nil {
-		Fatal(t, err)
+		fatal(t, err)
+	}
+}
+
+func nok(t *testing.T, err error) {
+	if err == nil {
+		fatal(t, "nil err")
 	}
 }
 
 func eq(t *testing.T, got, want interface{}) {
 	if !reflect.DeepEqual(got, want) {
-		Fatalf(t, "got %v, want %v", got, want)
+		fatalf(t, "got %v, want %v", got, want)
+	}
+}
+
+func neq(t *testing.T, got, notWant interface{}) {
+	if reflect.DeepEqual(got, notWant) {
+		fatalf(t, "got %v", got)
 	}
 }
 
@@ -65,5 +79,29 @@ func TestEnvSort(t *testing.T) {
 	eq(t, env(sh), "FOO=bar FOO4=4 FOOD=D")
 }
 
-func TestHello(t *testing.T) {
+func TestPushdPopd(t *testing.T) {
+	sh, cleanup, err := gosh.New(gosh.ShellOpts{})
+	ok(t, err)
+	defer cleanup()
+	startDir, err := os.Getwd()
+	parentDir := filepath.Dir(startDir)
+	ok(t, err)
+	neq(t, startDir, parentDir)
+	ok(t, sh.Pushd(parentDir))
+	cwd, err := os.Getwd()
+	ok(t, err)
+	eq(t, cwd, parentDir)
+	ok(t, sh.Pushd(startDir))
+	cwd, err = os.Getwd()
+	ok(t, err)
+	eq(t, cwd, startDir)
+	ok(t, sh.Popd())
+	cwd, err = os.Getwd()
+	ok(t, err)
+	eq(t, cwd, parentDir)
+	ok(t, sh.Popd())
+	cwd, err = os.Getwd()
+	ok(t, err)
+	eq(t, cwd, startDir)
+	nok(t, sh.Popd())
 }

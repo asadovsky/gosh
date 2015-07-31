@@ -7,6 +7,7 @@ package gosh
 // - Introspection mechanism, e.g. to see which commands are running
 
 import (
+	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
@@ -39,7 +40,6 @@ type Cmd interface {
 // Not thread-safe.
 // TODO: Maybe extract BinDir and BuildGoPkg into an ExtShell interface, to
 // demonstrate how to extend Shell.
-// TODO: Add Pushd/Popd.
 type Shell interface {
 	// Cmd returns a Cmd.
 	Cmd(name string, args ...string) Cmd
@@ -73,6 +73,12 @@ type Shell interface {
 	// MakeTempFile creates a new temporary file in os.TempDir, opens the file for
 	// reading and writing, and returns the resulting *os.File.
 	MakeTempFile() (*os.File, error)
+
+	// Pushd behaves like Bash pushd.
+	Pushd(dir string) error
+
+	// Popd behaves like Bash popd.
+	Popd() error
 }
 
 // ShellOpts configures Shell.
@@ -92,6 +98,7 @@ func New(opts ShellOpts) (Shell, func(), error) {
 		cmds:      []*cmd{},
 		tempDirs:  []string{},
 		tempFiles: []*os.File{},
+		dirStack:  []string{},
 	}
 	var err error
 	if sh.binDir, err = sh.MakeTempDir(); err != nil {
@@ -118,6 +125,7 @@ type shell struct {
 	tempDirs  []string
 	tempFiles []*os.File
 	binDir    string
+	dirStack  []string
 }
 
 func (sh *shell) err(err error) error {
@@ -221,6 +229,30 @@ func (sh *shell) MakeTempFile() (*os.File, error) {
 	}
 	sh.tempFiles = append(sh.tempFiles, f)
 	return f, nil
+}
+
+func (sh *shell) Pushd(dir string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return sh.err(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		return sh.err(err)
+	}
+	sh.dirStack = append(sh.dirStack, cwd)
+	return nil
+}
+
+func (sh *shell) Popd() error {
+	if len(sh.dirStack) == 0 {
+		return sh.err(fmt.Errorf("dir stack is empty"))
+	}
+	dir := sh.dirStack[len(sh.dirStack)-1]
+	if err := os.Chdir(dir); err != nil {
+		return sh.err(err)
+	}
+	sh.dirStack = sh.dirStack[:len(sh.dirStack)-1]
+	return nil
 }
 
 func (sh *shell) cleanup() {
