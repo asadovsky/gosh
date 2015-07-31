@@ -141,7 +141,7 @@ func (sh *shell) Cmd(name string, args ...string) Cmd {
 
 func (sh *shell) Set(vars ...string) {
 	for _, kv := range vars {
-		k, v := SplitKeyValue(kv)
+		k, v := splitKeyValue(kv)
 		if v == "" {
 			delete(sh.vars, k)
 		} else {
@@ -155,7 +155,7 @@ func (sh *shell) Get(name string) string {
 }
 
 func (sh *shell) Env() []string {
-	return MapToSlice(sh.vars)
+	return mapToSlice(sh.vars)
 }
 
 func (sh *shell) AppendArgs(args ...string) {
