@@ -1,6 +1,7 @@
 package gosh
 
 // TODO:
+// - AwaitReady and AwaitVars methods
 // - Single-binary mechanism, by means of a function registry
 // - Introspection mechanism, e.g. to see which commands are running
 
