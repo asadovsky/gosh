@@ -8,6 +8,7 @@ package gosh
 
 import (
 	"io/ioutil"
+	"log"
 	"os"
 	"os/exec"
 	"path"
@@ -165,7 +166,7 @@ func (sh *shell) Wait() error {
 	var res error
 	for _, cmd := range sh.cmds {
 		if err := cmd.Wait(); err != nil {
-			// TODO: Print warning.
+			log.Printf("WARNING: cmd.Wait() failed: %v, %v", cmd.Cmd, err)
 			res = err
 		}
 	}
@@ -226,15 +227,15 @@ func (sh *shell) cleanup() {
 	// TODO: Stop or kill all running processes.
 	for _, tempDir := range sh.tempDirs {
 		if err := os.RemoveAll(tempDir); err != nil {
-			// TODO: Print warning.
+			log.Printf("WARNING: os.RemoveAll(%q) failed: %v", tempDir, err)
 		}
 	}
 	for _, tempFile := range sh.tempFiles {
 		if err := tempFile.Close(); err != nil {
-			// TODO: Print warning.
+			log.Printf("WARNING: %q.Close() failed: %v", tempFile.Name(), err)
 		}
 		if err := os.RemoveAll(tempFile.Name()); err != nil {
-			// TODO: Print warning.
+			log.Printf("WARNING: os.RemoveAll(%q) failed: %v", tempFile.Name(), err)
 		}
 	}
 }

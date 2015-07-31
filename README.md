@@ -9,3 +9,8 @@ them, terminate them (e.g. on SIGINT), and so forth.
 Gosh is meant to be used in situations where you might otherwise be tempted to
 write a shell script. It is not a framework. It will not solve all your
 problems.
+
+## Development
+
+    GOPATH=~/dev/go go test github.com/asadovsky/gosh/...
+    GOPATH=~/dev/go go vet github.com/asadovsky/gosh/...
