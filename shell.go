@@ -1,7 +1,6 @@
 package gosh
 
 // TODO:
-// - AwaitReady and AwaitVars methods
 // - Single-binary mechanism, by means of a function registry
 // - Introspection mechanism, e.g. to see which commands are running
 
@@ -26,6 +25,13 @@ type Cmd interface {
 
 	// Start starts this command.
 	Start() error
+
+	// AwaitReady waits for the child to call SendReady.
+	AwaitReady() error
+
+	// AwaitVars waits for the child to send values for the given vars (using
+	// SendVars).
+	AwaitVars(vars ...string) (error, map[string]string)
 
 	// Wait waits for this command to complete.
 	Wait() error
@@ -108,6 +114,16 @@ func New(opts ShellOpts) (Shell, func(), error) {
 type cmd struct {
 	// TODO: Maybe wrap exec.Cmd instead of embedding it.
 	exec.Cmd
+}
+
+func (c *cmd) AwaitReady() error {
+	// FIXME
+	return nil
+}
+
+func (c *cmd) AwaitVars(vars ...string) (error, map[string]string) {
+	// FIXME
+	return nil, nil
 }
 
 func (c *cmd) Kill() error {

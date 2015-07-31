@@ -66,7 +66,7 @@ func TestEnv(t *testing.T) {
 	eq(t, env(sh), "BAR=2 FOO=0")
 	sh.Set("FOO=3", "BAR=4", "BAZ=5")
 	eq(t, env(sh), "BAR=4 BAZ=5 FOO=3")
-	sh.Set("FOO=", "BAR=6", "BAZ=")
+	sh.Set("FOO=", "BAR=6", "BAZ=") // unset FOO and BAZ
 	eq(t, env(sh), "BAR=6")
 }
 
