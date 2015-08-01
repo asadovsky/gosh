@@ -31,7 +31,7 @@ func (s keySorter) Less(i, j int) bool {
 	return ki < kj
 }
 
-// sliceToMap converts a slice of "k=v" entries to a map, preferring later
+// sliceToMap converts a slice of "KEY=value" entries to a map, preferring later
 // values over earlier ones.
 func sliceToMap(s []string) map[string]string {
 	m := make(map[string]string, len(s))
@@ -42,7 +42,7 @@ func sliceToMap(s []string) map[string]string {
 	return m
 }
 
-// mapToSlice converts a map to a slice of "k=v" entries, sorted by key.
+// mapToSlice converts a map to a slice of "KEY=value" entries, sorted by key.
 func mapToSlice(m map[string]string) []string {
 	s := make([]string, 0, len(m))
 	for k, v := range m {

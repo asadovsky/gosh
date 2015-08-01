@@ -20,30 +20,29 @@ import (
 // Not thread-safe.
 // TODO: Provide access to streams (stdin, stdout, stderr).
 type Cmd interface {
-	// Run starts this command and waits for it to complete.
-	Run() error
-
 	// Start starts this command.
 	Start() error
 
-	// AwaitReady waits for the child to call SendReady.
+	// AwaitReady waits for the child to call SendReady. Must be called after
+	// Start and before Wait.
 	AwaitReady() error
 
 	// AwaitVars waits for the child to send values for the given vars (using
-	// SendVars).
+	// SendVars). Must be called after Start and before Wait.
 	AwaitVars(vars ...string) (error, map[string]string)
 
 	// Wait waits for this command to complete.
 	Wait() error
 
-	// Kill terminates this command.
-	Kill() error
+	// Run starts this command and waits for it to complete.
+	Run() error
+
+	// Process returns the underlying process handle for this command.
+	Process() *os.Process
 }
 
 // Shell represents a shell with an environment (a set of vars).
 // Not thread-safe.
-// TODO: Maybe extract BinDir and BuildGoPkg into an ExtShell interface, to
-// demonstrate how to extend Shell.
 type Shell interface {
 	// Cmd returns a Cmd.
 	Cmd(name string, args ...string) Cmd
@@ -65,9 +64,14 @@ type Shell interface {
 	// if all commands ran successfully. Otherwise, returns some command's error.
 	Wait() error
 
+	// BinDir returns the directory where BuildGoPkg() writes compiled binaries.
+	// Defaults to SHELL_BIN_DIR, if set.
+	BinDir() string
+
 	// BuildGoPkg compiles a Go package using the "go build" command and writes
-	// the resulting binary to BinDir(). It returns the absolute path to the
-	// binary.
+	// the resulting binary to BinDir(). Returns the absolute path to the binary.
+	// Included in Shell for convenience, but could have just as easily been
+	// provided as a utility function.
 	BuildGoPkg(pkg string, flags ...string) (string, error)
 
 	// MakeTempDir creates a new temporary directory in os.TempDir and returns the
@@ -104,15 +108,16 @@ func New(opts ShellOpts) (Shell, func(), error) {
 		tempFiles: []*os.File{},
 		dirStack:  []string{},
 	}
-	var err error
-	if sh.binDir, err = sh.MakeTempDir(); err != nil {
-		return nil, nil, sh.err(err)
+	if sh.binDir = os.Getenv("SHELL_BIN_DIR"); sh.binDir == "" {
+		var err error
+		if sh.binDir, err = sh.MakeTempDir(); err != nil {
+			return nil, nil, sh.err(err)
+		}
 	}
 	return sh, sh.cleanup, nil
 }
 
 type cmd struct {
-	// TODO: Maybe wrap exec.Cmd instead of embedding it.
 	exec.Cmd
 }
 
@@ -126,9 +131,8 @@ func (c *cmd) AwaitVars(vars ...string) (error, map[string]string) {
 	return nil, nil
 }
 
-func (c *cmd) Kill() error {
-	// FIXME
-	return nil
+func (c *cmd) Process() *os.Process {
+	return c.Cmd.Process
 }
 
 type shell struct {
