@@ -257,15 +257,15 @@ func (c *cmd) process() *os.Process {
 
 type shell struct {
 	err           error
-	calledCleanup bool
-	cleanupLock   sync.Mutex
 	opts          ShellOpts
 	vars          map[string]string
 	args          []string
 	cmds          []*cmd
-	tempDirs      []string
 	tempFiles     []*os.File
-	dirStack      []string
+	tempDirs      []string
+	dirStack      []string   // for pushd/popd
+	cleanupLock   sync.Mutex // protects calledCleanup
+	calledCleanup bool
 }
 
 func newShell(opts ShellOpts) (*shell, error) {
@@ -280,8 +280,8 @@ func newShell(opts ShellOpts) (*shell, error) {
 		vars:      map[string]string{},
 		args:      []string{},
 		cmds:      []*cmd{},
-		tempDirs:  []string{},
 		tempFiles: []*os.File{},
+		tempDirs:  []string{},
 		dirStack:  []string{},
 	}
 	if sh.opts.BinDir == "" {
@@ -301,9 +301,12 @@ func newShell(opts ShellOpts) (*shell, error) {
 		sh.log(false, fmt.Sprintf("Received signal: %v", sig))
 		sh.cleanupLock.Lock()
 		if !sh.calledCleanup {
+			sh.calledCleanup = true
+			sh.cleanupLock.Unlock()
 			sh.cleanup()
+		} else {
+			sh.cleanupLock.Unlock()
 		}
-		sh.cleanupLock.Unlock()
 		// http://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
 		// Unfortunately, os.Signal does not expose the signal number.
 		os.Exit(1)
@@ -357,16 +360,16 @@ func (sh *shell) BuildGoPkg(pkg string, flags ...string) string {
 	return res
 }
 
-func (sh *shell) MakeTempDir() string {
+func (sh *shell) MakeTempFile() *os.File {
 	sh.ok()
-	res, err := sh.makeTempDir()
+	res, err := sh.makeTempFile()
 	sh.setErr(err)
 	return res
 }
 
-func (sh *shell) MakeTempFile() *os.File {
+func (sh *shell) MakeTempDir() string {
 	sh.ok()
-	res, err := sh.makeTempFile()
+	res, err := sh.makeTempDir()
 	sh.setErr(err)
 	return res
 }
@@ -383,10 +386,11 @@ func (sh *shell) Popd() {
 
 func (sh *shell) Cleanup() {
 	sh.cleanupLock.Lock()
-	defer sh.cleanupLock.Unlock()
 	if sh.calledCleanup {
 		panic("already called cleanup")
 	}
+	sh.calledCleanup = true
+	sh.cleanupLock.Unlock()
 	sh.cleanup()
 }
 
@@ -411,10 +415,10 @@ func (sh *shell) ok() {
 		panic(sh.err)
 	}
 	sh.cleanupLock.Lock()
-	defer sh.cleanupLock.Unlock()
 	if sh.calledCleanup {
 		panic("already called cleanup")
 	}
+	sh.cleanupLock.Unlock()
 }
 
 func (sh *shell) setErr(err error) {
@@ -472,7 +476,7 @@ func (sh *shell) wait() error {
 	var res error
 	for _, c := range sh.cmds {
 		if err := c.wait(); err != nil {
-			sh.log(true, fmt.Sprintf("Cmd.Wait() failed: %q, %v", c.c.Path, err))
+			sh.log(true, fmt.Sprintf("Cmd.Wait() failed: %v", err))
 			if res == nil {
 				res = err
 			}
@@ -508,15 +512,6 @@ func (sh *shell) buildGoPkg(pkg string, flags ...string) (string, error) {
 	return binPath, nil
 }
 
-func (sh *shell) makeTempDir() (string, error) {
-	name, err := ioutil.TempDir("", "")
-	if err != nil {
-		return "", err
-	}
-	sh.tempDirs = append(sh.tempDirs, name)
-	return name, nil
-}
-
 func (sh *shell) makeTempFile() (*os.File, error) {
 	f, err := ioutil.TempFile("", "")
 	if err != nil {
@@ -524,6 +519,15 @@ func (sh *shell) makeTempFile() (*os.File, error) {
 	}
 	sh.tempFiles = append(sh.tempFiles, f)
 	return f, nil
+}
+
+func (sh *shell) makeTempDir() (string, error) {
+	name, err := ioutil.TempDir("", "")
+	if err != nil {
+		return "", err
+	}
+	sh.tempDirs = append(sh.tempDirs, name)
+	return name, nil
 }
 
 func (sh *shell) pushd(dir string) error {
@@ -550,14 +554,40 @@ func (sh *shell) popd() error {
 	return nil
 }
 
-func (sh *shell) cleanup() {
-	sh.calledCleanup = true
-	// FIXME: Stop or kill all running child processes.
-	for _, tempDir := range sh.tempDirs {
-		if err := os.RemoveAll(tempDir); err != nil {
-			sh.log(false, fmt.Sprintf("os.RemoveAll(%q) failed: %v", tempDir, err))
+// forEachRunningProcess applies fn to each running process.
+func (sh *shell) forEachRunningProcess(fn func(*os.Process)) {
+	for _, c := range sh.cmds {
+		if c.c.ProcessState != nil && c.c.ProcessState.Exited() {
+			return
+		}
+		if c.c.Process != nil {
+			fn(c.c.Process)
 		}
 	}
+}
+
+func (sh *shell) cleanup() {
+	// Terminate all running child processes. Try SIGTERM first; if that doesn't
+	// work, use SIGKILL.
+	// https://golang.org/pkg/os/#Process.Signal
+	sh.forEachRunningProcess(func(p *os.Process) {
+		if err := p.Signal(syscall.SIGTERM); err != nil {
+			sh.log(false, fmt.Sprintf("%d.Signal(SIGTERM) failed: %v", p.Pid, err))
+		}
+	})
+	anyRunning := false
+	sh.forEachRunningProcess(func(p *os.Process) {
+		anyRunning = true
+	})
+	if anyRunning {
+		time.Sleep(time.Second)
+		sh.forEachRunningProcess(func(p *os.Process) {
+			if err := p.Kill(); err != nil {
+				sh.log(false, fmt.Sprintf("%d.Kill() failed: %v", p.Pid, err))
+			}
+		})
+	}
+	// Close and delete all temporary files.
 	for _, tempFile := range sh.tempFiles {
 		name := tempFile.Name()
 		if err := tempFile.Close(); err != nil {
@@ -565,6 +595,12 @@ func (sh *shell) cleanup() {
 		}
 		if err := os.RemoveAll(name); err != nil {
 			sh.log(false, fmt.Sprintf("os.RemoveAll(%q) failed: %v", name, err))
+		}
+	}
+	// Delete all temporary directories.
+	for _, tempDir := range sh.tempDirs {
+		if err := os.RemoveAll(tempDir); err != nil {
+			sh.log(false, fmt.Sprintf("os.RemoveAll(%q) failed: %v", tempDir, err))
 		}
 	}
 }

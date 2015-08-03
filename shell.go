@@ -76,14 +76,14 @@ type Shell interface {
 	// have just as easily been provided as a utility function.
 	BuildGoPkg(pkg string, flags ...string) string
 
-	// MakeTempDir creates a new temporary directory in os.TempDir and returns the
-	// path of the new directory. May produce an error.
-	MakeTempDir() string
-
 	// MakeTempFile creates a new temporary file in os.TempDir, opens the file for
 	// reading and writing, and returns the resulting *os.File. May produce an
 	// error.
 	MakeTempFile() *os.File
+
+	// MakeTempDir creates a new temporary directory in os.TempDir and returns the
+	// path of the new directory. May produce an error.
+	MakeTempDir() string
 
 	// Pushd behaves like Bash pushd. May produce an error.
 	Pushd(dir string)
