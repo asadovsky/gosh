@@ -552,7 +552,7 @@ func (sh *shell) popd() error {
 
 func (sh *shell) cleanup() {
 	sh.calledCleanup = true
-	// TODO: Stop or kill all running child processes.
+	// FIXME: Stop or kill all running child processes.
 	for _, tempDir := range sh.tempDirs {
 		if err := os.RemoveAll(tempDir); err != nil {
 			sh.log(false, fmt.Sprintf("os.RemoveAll(%q) failed: %v", tempDir, err))
