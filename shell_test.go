@@ -1,6 +1,9 @@
 package gosh_test
 
+// TODO: Add more tests.
+
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -50,8 +53,8 @@ func env(sh gosh.Shell) string {
 }
 
 func TestEnv(t *testing.T) {
-	sh, cleanup, _ := gosh.New(gosh.ShellOpts{T: t})
-	defer cleanup()
+	sh := gosh.NewShell(gosh.ShellOpts{T: t})
+	defer sh.Cleanup()
 	eq(t, sh.Get("FOO"), "")
 	eq(t, env(sh), "")
 	sh.Set("FOO=1")
@@ -71,8 +74,8 @@ func TestEnv(t *testing.T) {
 }
 
 func TestEnvSort(t *testing.T) {
-	sh, cleanup, _ := gosh.New(gosh.ShellOpts{T: t})
-	defer cleanup()
+	sh := gosh.NewShell(gosh.ShellOpts{T: t})
+	defer sh.Cleanup()
 	sh.Set("FOO4=4")
 	sh.Set("FOO=bar")
 	sh.Set("FOOD=D")
@@ -80,28 +83,52 @@ func TestEnvSort(t *testing.T) {
 }
 
 func TestPushdPopd(t *testing.T) {
-	sh, cleanup, err := gosh.New(gosh.ShellOpts{})
-	ok(t, err)
-	defer cleanup()
+	sh := gosh.NewShell(gosh.ShellOpts{T: t, NoDieOnErr: true})
+	ok(t, sh.Err())
+	defer sh.Cleanup()
 	startDir, err := os.Getwd()
-	parentDir := filepath.Dir(startDir)
 	ok(t, err)
+	parentDir := filepath.Dir(startDir)
 	neq(t, startDir, parentDir)
-	ok(t, sh.Pushd(parentDir))
+	sh.Pushd(parentDir)
+	ok(t, sh.Err())
 	cwd, err := os.Getwd()
 	ok(t, err)
 	eq(t, cwd, parentDir)
-	ok(t, sh.Pushd(startDir))
+	sh.Pushd(startDir)
+	ok(t, sh.Err())
 	cwd, err = os.Getwd()
 	ok(t, err)
 	eq(t, cwd, startDir)
-	ok(t, sh.Popd())
+	sh.Popd()
+	ok(t, sh.Err())
 	cwd, err = os.Getwd()
 	ok(t, err)
 	eq(t, cwd, parentDir)
-	ok(t, sh.Popd())
+	sh.Popd()
+	ok(t, sh.Err())
 	cwd, err = os.Getwd()
 	ok(t, err)
 	eq(t, cwd, startDir)
-	nok(t, sh.Popd())
+	sh.Popd()
+	nok(t, sh.Err())
+}
+
+func TestHello(t *testing.T) {
+	sh := gosh.NewShell(gosh.ShellOpts{T: t})
+	defer sh.Cleanup()
+
+	// Start server.
+	binPath := sh.BuildGoPkg("github.com/asadovsky/gosh/hello_server")
+	c := sh.Cmd(binPath)
+	c.Start()
+	c.AwaitReady()
+	addr := c.AwaitVars("Addr")["Addr"]
+	fmt.Println(addr)
+
+	// Run client.
+	binPath = sh.BuildGoPkg("github.com/asadovsky/gosh/hello_client")
+	c = sh.Cmd(binPath, "-addr="+addr)
+	output := string(c.Output())
+	fmt.Printf(output)
 }

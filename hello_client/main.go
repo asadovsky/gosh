@@ -1,14 +1,18 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
 )
 
+var addr = flag.String("addr", "localhost:8080", "server addr")
+
 func main() {
-	resp, err := http.Get("http://localhost:8080")
+	flag.Parse()
+	resp, err := http.Get("http://" + *addr)
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -13,33 +13,33 @@ import (
 )
 
 const (
-	prefix    = "#! "
+	msgPrefix = "#! "
 	typeReady = "ready"
 	typeVars  = "vars"
 )
 
-type message struct {
-	Type    string
-	Payload interface{}
+type msg struct {
+	Type string
+	Vars map[string]string // nil if Type is typeReady
 }
 
-func send(m message) {
+func send(m msg) {
 	data, err := json.Marshal(m)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("%s%s\n", prefix, data)
+	fmt.Printf("%s%s\n", msgPrefix, data)
 }
 
 // SendReady tells the parent process that this child process is "ready", e.g.
 // ready to serve requests.
 func SendReady() {
-	send(message{Type: "ready"})
+	send(msg{Type: typeReady})
 }
 
 // SendVars sends the given vars to the parent process.
 func SendVars(vars map[string]string) {
-	send(message{Type: "vars", Payload: vars})
+	send(msg{Type: typeVars, Vars: vars})
 }
 
 // WatchParent starts a goroutine that periodically checks whether the parent

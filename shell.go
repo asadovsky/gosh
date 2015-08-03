@@ -1,41 +1,40 @@
 package gosh
 
-// TODO:
-// - Single-binary mechanism, by means of a function registry
-// - Introspection mechanism, e.g. to see which commands are running
+// TODO: Add single-binary mechanism, by means of a function registry.
 
 import (
-	"fmt"
-	"io/ioutil"
-	"log"
 	"os"
-	"os/exec"
-	"path"
-	"path/filepath"
-	"runtime/debug"
 	"testing"
 )
 
-// Cmd represents a command. Errors typically originate from exec.Cmd.
+// Cmd represents a command.
 // Not thread-safe.
-// TODO: Provide access to streams (stdin, stdout, stderr).
 type Cmd interface {
-	// Start starts this command.
-	Start() error
+	// Start starts this command. May produce an error.
+	Start()
 
-	// AwaitReady waits for the child to call SendReady. Must be called after
-	// Start and before Wait.
-	AwaitReady() error
+	// AwaitReady waits for the child process to call SendReady. Must be called
+	// after Start and before Wait. May produce an error.
+	AwaitReady()
 
-	// AwaitVars waits for the child to send values for the given vars (using
-	// SendVars). Must be called after Start and before Wait.
-	AwaitVars(vars ...string) (error, map[string]string)
+	// AwaitVars waits for the child process to send values for the given vars
+	// (using SendVars). Must be called after Start and before Wait. May produce
+	// an error.
+	AwaitVars(keys ...string) map[string]string
 
-	// Wait waits for this command to complete.
-	Wait() error
+	// Wait waits for this command to complete. May produce an error.
+	Wait()
 
-	// Run starts this command and waits for it to complete.
-	Run() error
+	// Run starts this command and waits for it to complete. May produce an error.
+	Run()
+
+	// Output runs this command and returns its standard output. May produce an
+	// error.
+	Output() []byte
+
+	// CombinedOutput runs this command and returns its combined standard output
+	// and standard error. May produce an error.
+	CombinedOutput() []byte
 
 	// Process returns the underlying process handle for this command.
 	Process() *os.Process
@@ -44,10 +43,17 @@ type Cmd interface {
 // Shell represents a shell with an environment (a set of vars).
 // Not thread-safe.
 type Shell interface {
+	// Err returns the most recent error, if any.
+	Err() error
+
+	// Opts returns the ShellOpts struct for this Shell, with default values
+	// filled in.
+	Opts() ShellOpts
+
 	// Cmd returns a Cmd.
 	Cmd(name string, args ...string) Cmd
 
-	// Set sets the given env vars, of the form "KEY=value" or "KEY=".
+	// Set sets the given env vars, of the form "key=value" or "key=".
 	Set(vars ...string)
 
 	// Get returns the value of the given env var.
@@ -60,232 +66,62 @@ type Shell interface {
 	// commands that it runs.
 	AppendArgs(args ...string)
 
-	// Wait waits for all commands started by this Shell to complete. Returns nil
-	// if all commands ran successfully. Otherwise, returns some command's error.
-	Wait() error
-
-	// BinDir returns the directory where BuildGoPkg() writes compiled binaries.
-	// Defaults to SHELL_BIN_DIR, if set.
-	BinDir() string
+	// Wait waits for all commands started by this Shell to complete. Produces an
+	// error if any individual command's Wait() failed.
+	Wait()
 
 	// BuildGoPkg compiles a Go package using the "go build" command and writes
-	// the resulting binary to BinDir(). Returns the absolute path to the binary.
-	// Included in Shell for convenience, but could have just as easily been
-	// provided as a utility function.
-	BuildGoPkg(pkg string, flags ...string) (string, error)
+	// the resulting binary to ShellOpts.BinDir. Returns the absolute path to the
+	// binary. May produce an error. Included in Shell for convenience, but could
+	// have just as easily been provided as a utility function.
+	BuildGoPkg(pkg string, flags ...string) string
 
 	// MakeTempDir creates a new temporary directory in os.TempDir and returns the
-	// path of the new directory.
-	MakeTempDir() (string, error)
+	// path of the new directory. May produce an error.
+	MakeTempDir() string
 
 	// MakeTempFile creates a new temporary file in os.TempDir, opens the file for
-	// reading and writing, and returns the resulting *os.File.
-	MakeTempFile() (*os.File, error)
+	// reading and writing, and returns the resulting *os.File. May produce an
+	// error.
+	MakeTempFile() *os.File
 
-	// Pushd behaves like Bash pushd.
-	Pushd(dir string) error
+	// Pushd behaves like Bash pushd. May produce an error.
+	Pushd(dir string)
 
-	// Popd behaves like Bash popd.
-	Popd() error
+	// Popd behaves like Bash popd. May produce an error.
+	Popd()
+
+	// Cleanup cleans up all resources (child processes, temporary files and
+	// directories) associated with this Shell.
+	Cleanup()
 }
 
 // ShellOpts configures Shell.
 type ShellOpts struct {
-	// If not nil, all errors trigger T.Fatal.
+	// If not nil, errors trigger T.Fatal instead of panic.
 	T *testing.T
-	// If true, all errors trigger panic.
-	PanicOnError bool
+	// If true, errors are logged but do not trigger T.Fatal or panic. Errors can
+	// be accessed via Err(). Shell and Cmd interface comments specify which
+	// methods can produce errors. All Shell and Cmd methods except Shell.Err()
+	// and Shell.Cleanup() panic if Err() is not nil.
+	NoDieOnErr bool
+	// By default, child stdout and stderr are propagated up to the parent's
+	// stdout and stderr. If SuppressChildOutput is true, child stdout and stderr
+	// are not propagated up.
+	// If not specified, defaults to (GOSH_SUPPRESS_CHILD_OUTPUT != "").
+	SuppressChildOutput bool
+	// If specified, each child's stdout and stderr streams are also piped to
+	// files in this directory.
+	// If not specified, defaults to GOSH_CHILD_OUTPUT_DIR.
+	ChildOutputDir string
+	// Directory where BuildGoPkg() writes compiled binaries.
+	// If not specified, defaults to GOSH_BIN_DIR.
+	BinDir string
 }
 
-// New returns a new Shell.
-func New(opts ShellOpts) (Shell, func(), error) {
-	sh := &shell{
-		opts:      opts,
-		vars:      map[string]string{},
-		args:      []string{},
-		cmds:      []*cmd{},
-		tempDirs:  []string{},
-		tempFiles: []*os.File{},
-		dirStack:  []string{},
-	}
-	if sh.binDir = os.Getenv("SHELL_BIN_DIR"); sh.binDir == "" {
-		var err error
-		if sh.binDir, err = sh.MakeTempDir(); err != nil {
-			return nil, nil, sh.err(err)
-		}
-	}
-	return sh, sh.cleanup, nil
-}
-
-type cmd struct {
-	exec.Cmd
-}
-
-func (c *cmd) AwaitReady() error {
-	// FIXME
-	return nil
-}
-
-func (c *cmd) AwaitVars(vars ...string) (error, map[string]string) {
-	// FIXME
-	return nil, nil
-}
-
-func (c *cmd) Process() *os.Process {
-	return c.Cmd.Process
-}
-
-type shell struct {
-	opts      ShellOpts
-	vars      map[string]string
-	args      []string
-	cmds      []*cmd
-	tempDirs  []string
-	tempFiles []*os.File
-	binDir    string
-	dirStack  []string
-}
-
-func (sh *shell) err(err error) error {
-	if err != nil {
-		if sh.opts.T != nil {
-			debug.PrintStack()
-			sh.opts.T.Fatal(err)
-		}
-		if sh.opts.PanicOnError {
-			panic(err)
-		}
-	}
-	return err
-}
-
-func (sh *shell) Cmd(name string, args ...string) Cmd {
-	c := &cmd{Cmd: *exec.Command(name, append(args, sh.args...)...)}
-	sh.cmds = append(sh.cmds, c)
-	return c
-}
-
-func (sh *shell) Set(vars ...string) {
-	for _, kv := range vars {
-		k, v := splitKeyValue(kv)
-		if v == "" {
-			delete(sh.vars, k)
-		} else {
-			sh.vars[k] = v
-		}
-	}
-}
-
-func (sh *shell) Get(name string) string {
-	return sh.vars[name]
-}
-
-func (sh *shell) Env() []string {
-	return mapToSlice(sh.vars)
-}
-
-func (sh *shell) AppendArgs(args ...string) {
-	sh.args = append(sh.args, args...)
-}
-
-func (sh *shell) Wait() error {
-	var res error
-	for _, cmd := range sh.cmds {
-		if err := cmd.Wait(); err != nil {
-			log.Printf("WARNING: cmd.Wait() failed: %v, %v", cmd.Cmd, err)
-			res = err
-		}
-	}
-	return res
-}
-
-func (sh *shell) BinDir() string {
-	return sh.binDir
-}
-
-func (sh *shell) BuildGoPkg(pkg string, flags ...string) (string, error) {
-	binPath := filepath.Join(sh.BinDir(), path.Base(pkg))
-	// If this binary has already been built, don't rebuild it.
-	if _, err := os.Stat(binPath); err == nil {
-		return binPath, nil
-	} else if !os.IsNotExist(err) {
-		return "", sh.err(err)
-	}
-	// Build binary to tempBinPath, then move it to binPath.
-	tempDir, err := ioutil.TempDir(sh.BinDir(), "")
-	if err != nil {
-		return "", sh.err(err)
-	}
-	defer os.RemoveAll(tempDir)
-	tempBinPath := filepath.Join(tempDir, path.Base(pkg))
-	args := []string{"build", "-x", "-o", tempBinPath}
-	args = append(args, flags...)
-	args = append(args, pkg)
-	err = sh.Cmd("go", args...).Run()
-	if err != nil {
-		return "", sh.err(err)
-	}
-	if err := os.Rename(tempBinPath, binPath); err != nil {
-		return "", sh.err(err)
-	}
-	return binPath, nil
-}
-
-func (sh *shell) MakeTempDir() (string, error) {
-	name, err := ioutil.TempDir("", "")
-	if err != nil {
-		return "", sh.err(err)
-	}
-	sh.tempDirs = append(sh.tempDirs, name)
-	return name, nil
-}
-
-func (sh *shell) MakeTempFile() (*os.File, error) {
-	f, err := ioutil.TempFile("", "")
-	if err != nil {
-		return nil, sh.err(err)
-	}
-	sh.tempFiles = append(sh.tempFiles, f)
-	return f, nil
-}
-
-func (sh *shell) Pushd(dir string) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return sh.err(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		return sh.err(err)
-	}
-	sh.dirStack = append(sh.dirStack, cwd)
-	return nil
-}
-
-func (sh *shell) Popd() error {
-	if len(sh.dirStack) == 0 {
-		return sh.err(fmt.Errorf("dir stack is empty"))
-	}
-	dir := sh.dirStack[len(sh.dirStack)-1]
-	if err := os.Chdir(dir); err != nil {
-		return sh.err(err)
-	}
-	sh.dirStack = sh.dirStack[:len(sh.dirStack)-1]
-	return nil
-}
-
-func (sh *shell) cleanup() {
-	// TODO: Stop or kill all running processes.
-	for _, tempDir := range sh.tempDirs {
-		if err := os.RemoveAll(tempDir); err != nil {
-			log.Printf("WARNING: os.RemoveAll(%q) failed: %v", tempDir, err)
-		}
-	}
-	for _, tempFile := range sh.tempFiles {
-		if err := tempFile.Close(); err != nil {
-			log.Printf("WARNING: %q.Close() failed: %v", tempFile.Name(), err)
-		}
-		if err := os.RemoveAll(tempFile.Name()); err != nil {
-			log.Printf("WARNING: os.RemoveAll(%q) failed: %v", tempFile.Name(), err)
-		}
-	}
+// NewShell returns a new Shell. May produce an error.
+func NewShell(opts ShellOpts) Shell {
+	sh, err := newShell(opts)
+	sh.setErr(err)
+	return sh
 }
