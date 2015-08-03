@@ -9,10 +9,12 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"runtime/debug"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -116,7 +118,7 @@ func (w *recvWriter) Write(p []byte) (n int, err error) {
 					w.c.condVars.Signal()
 					w.c.condVars.L.Unlock()
 				default:
-					return 0, fmt.Errorf("unexpected message type %q", m.Type)
+					return 0, fmt.Errorf("unknown message type: %q", m.Type)
 				}
 			}
 			// Reset state for next line.
@@ -256,6 +258,7 @@ func (c *cmd) process() *os.Process {
 type shell struct {
 	err           error
 	calledCleanup bool
+	cleanupLock   sync.Mutex
 	opts          ShellOpts
 	vars          map[string]string
 	args          []string
@@ -290,6 +293,21 @@ func newShell(opts ShellOpts) (*shell, error) {
 			}
 		}
 	}
+	// Run sh.cleanup() (if needed) when a termination signal is received.
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	go func() {
+		sig := <-ch
+		sh.log(false, fmt.Sprintf("Received signal: %v", sig))
+		sh.cleanupLock.Lock()
+		if !sh.calledCleanup {
+			sh.cleanup()
+		}
+		sh.cleanupLock.Unlock()
+		// http://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
+		// Unfortunately, os.Signal does not expose the signal number.
+		os.Exit(1)
+	}()
 	return sh, nil
 }
 
@@ -364,6 +382,8 @@ func (sh *shell) Popd() {
 }
 
 func (sh *shell) Cleanup() {
+	sh.cleanupLock.Lock()
+	defer sh.cleanupLock.Unlock()
 	if sh.calledCleanup {
 		panic("already called cleanup")
 	}
@@ -390,6 +410,8 @@ func (sh *shell) ok() {
 	if sh.err != nil {
 		panic(sh.err)
 	}
+	sh.cleanupLock.Lock()
+	defer sh.cleanupLock.Unlock()
 	if sh.calledCleanup {
 		panic("already called cleanup")
 	}

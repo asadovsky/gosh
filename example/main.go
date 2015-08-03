@@ -10,7 +10,7 @@ import (
 
 func ExampleHello() {
 	sh := gosh.NewShell(gosh.ShellOpts{})
-	defer sh.Free()
+	defer sh.Cleanup()
 
 	// Start server.
 	binPath := sh.BuildGoPkg("github.com/asadovsky/gosh/hello_server")
