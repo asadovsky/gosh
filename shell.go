@@ -9,17 +9,18 @@ import (
 
 // Cmd represents a command.
 // Not thread-safe.
+// TODO: Add hooks to modify env vars or args for unstarted commands?
 type Cmd interface {
 	// Start starts this command. May produce an error.
 	Start()
 
-	// AwaitReady waits for the child process to call SendReady. Must be called
-	// after Start and before Wait. May produce an error.
+	// AwaitReady waits for the child process to call SendReady. Must not be
+	// called before Start or after Wait. May produce an error.
 	AwaitReady()
 
 	// AwaitVars waits for the child process to send values for the given vars
-	// (using SendVars). Must be called after Start and before Wait. May produce
-	// an error.
+	// (using SendVars). Must not be called before Start or after Wait. May
+	// produce an error.
 	AwaitVars(keys ...string) map[string]string
 
 	// Wait waits for this command to complete. May produce an error.
@@ -42,6 +43,7 @@ type Cmd interface {
 
 // Shell represents a shell with an environment (a set of vars).
 // Not thread-safe.
+// TODO: Propagate certain flags (e.g. logging flags) to subprocesses?
 type Shell interface {
 	// Err returns the most recent error, if any.
 	Err() error
@@ -51,7 +53,12 @@ type Shell interface {
 	Opts() ShellOpts
 
 	// Cmd returns a Cmd.
+	// TODO: Add env parameter?
 	Cmd(name string, args ...string) Cmd
+
+	// Func returns a Cmd for the function registered with the given name.
+	// TODO: Add env parameter?
+	Func(name string, args ...interface{}) Cmd
 
 	// Set sets the given env vars, of the form "key=value" or "key=".
 	Set(vars ...string)
