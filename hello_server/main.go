@@ -29,6 +29,8 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Hello, world!")
 	})
+	// Note, with http.ListenAndServe() there's no easy way to tell which port
+	// number we were assigned.
 	srv := &http.Server{Addr: "localhost:0"}
 	ln, err := net.Listen("tcp", srv.Addr)
 	if err != nil {

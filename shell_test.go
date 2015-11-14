@@ -120,7 +120,7 @@ func TestHello(t *testing.T) {
 
 	// Start server.
 	binPath := sh.BuildGoPkg("github.com/asadovsky/gosh/hello_server")
-	c := sh.Cmd(binPath)
+	c := sh.Cmd(nil, binPath)
 	c.Start()
 	c.AwaitReady()
 	addr := c.AwaitVars("Addr")["Addr"]
@@ -128,7 +128,7 @@ func TestHello(t *testing.T) {
 
 	// Run client.
 	binPath = sh.BuildGoPkg("github.com/asadovsky/gosh/hello_client")
-	c = sh.Cmd(binPath, "-addr="+addr)
+	c = sh.Cmd(nil, binPath, "-addr="+addr)
 	output := string(c.Output())
 	fmt.Printf(output)
 }

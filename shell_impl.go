@@ -183,8 +183,6 @@ func (c *cmd) start() error {
 			return err
 		}
 	}
-	// TODO: Wrap every child process with a "supervisor" process that calls
-	// WatchParent.
 	return c.c.Start()
 }
 
@@ -323,9 +321,14 @@ func (sh *shell) Opts() ShellOpts {
 	return sh.getOpts()
 }
 
-func (sh *shell) Cmd(name string, args ...string) Cmd {
+func (sh *shell) Cmd(env []string, name string, args ...string) Cmd {
 	sh.ok()
-	return sh.cmd(name, args...)
+	return sh.cmd(env, name, args...)
+}
+
+func (sh *shell) Fn(env []string, name string, args ...interface{}) Cmd {
+	sh.ok()
+	return sh.fn(env, name, args...)
 }
 
 func (sh *shell) Set(vars ...string) {
@@ -442,11 +445,15 @@ func (sh *shell) getOpts() ShellOpts {
 	return sh.opts
 }
 
-func (sh *shell) cmd(name string, args ...string) *cmd {
+func (sh *shell) cmd(env []string, name string, args ...string) *cmd {
 	c := newCmd(sh, name, append(args, sh.args...)...)
-	c.c.Env = mapToSlice(mergeMaps(sliceToMap(os.Environ()), sh.vars))
+	c.c.Env = mapToSlice(mergeMaps(sliceToMap(os.Environ()), sh.vars, sliceToMap(env)))
 	sh.cmds = append(sh.cmds, c)
 	return c
+}
+
+func (sh *shell) fn(env []string, name string, args ...interface{}) *cmd {
+	panic("not implemented")
 }
 
 func (sh *shell) set(vars ...string) {
@@ -503,7 +510,7 @@ func (sh *shell) buildGoPkg(pkg string, flags ...string) (string, error) {
 	args := []string{"build", "-x", "-o", tempBinPath}
 	args = append(args, flags...)
 	args = append(args, pkg)
-	if err := sh.cmd("go", args...).run(); err != nil {
+	if err := sh.cmd(nil, "go", args...).run(); err != nil {
 		return "", err
 	}
 	if err := os.Rename(tempBinPath, binPath); err != nil {
@@ -580,6 +587,7 @@ func (sh *shell) cleanup() {
 		anyRunning = true
 	})
 	if anyRunning {
+		// Only sleep if some child process is still running.
 		time.Sleep(time.Second)
 		sh.forEachRunningProcess(func(p *os.Process) {
 			if err := p.Kill(); err != nil {

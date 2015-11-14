@@ -1,15 +1,14 @@
 package gosh
 
-// TODO: Add single-binary mechanism, by means of a function registry.
-
 import (
 	"os"
 	"testing"
 )
 
 // Cmd represents a command.
+// All configuration of env vars and args for this command should be done via
+// the Shell.
 // Not thread-safe.
-// TODO: Add hooks to modify env vars or args for unstarted commands?
 type Cmd interface {
 	// Start starts this command. May produce an error.
 	Start()
@@ -43,7 +42,6 @@ type Cmd interface {
 
 // Shell represents a shell with an environment (a set of vars).
 // Not thread-safe.
-// TODO: Propagate certain flags (e.g. logging flags) to subprocesses?
 type Shell interface {
 	// Err returns the most recent error, if any.
 	Err() error
@@ -53,12 +51,10 @@ type Shell interface {
 	Opts() ShellOpts
 
 	// Cmd returns a Cmd.
-	// TODO: Add env parameter?
-	Cmd(name string, args ...string) Cmd
+	Cmd(env []string, name string, args ...string) Cmd
 
-	// Func returns a Cmd for the function registered with the given name.
-	// TODO: Add env parameter?
-	Func(name string, args ...interface{}) Cmd
+	// Fn returns a Cmd for the function registered with the given name.
+	Fn(env []string, name string, args ...interface{}) Cmd
 
 	// Set sets the given env vars, of the form "key=value" or "key=".
 	Set(vars ...string)
@@ -70,7 +66,8 @@ type Shell interface {
 	Env() []string
 
 	// AppendArgs configures this Shell to append the given args to all subsequent
-	// commands that it runs.
+	// commands that it runs. For example, can be used to propagate logging flags
+	// to all child processes.
 	AppendArgs(args ...string)
 
 	// Wait waits for all commands started by this Shell to complete. Produces an
