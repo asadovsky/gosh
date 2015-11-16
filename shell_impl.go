@@ -2,6 +2,8 @@ package gosh
 
 import (
 	"bytes"
+	"encoding/gob"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,7 +11,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path"
 	"path/filepath"
 	"runtime/debug"
@@ -17,6 +18,8 @@ import (
 	"syscall"
 	"time"
 )
+
+const invocationEnv = "GOSH_INVOCATION"
 
 ////////////////////////////////////////////////////////////////////////////////
 // Cmd
@@ -232,18 +235,18 @@ func (c *cmd) run() error {
 }
 
 func (c *cmd) output() ([]byte, error) {
-	var b bytes.Buffer
-	c.c.Stdout = &b
+	var buf bytes.Buffer
+	c.c.Stdout = &buf
 	err := c.run()
-	return b.Bytes(), err
+	return buf.Bytes(), err
 }
 
 func (c *cmd) combinedOutput() ([]byte, error) {
-	var b bytes.Buffer
-	c.c.Stdout = &b
-	c.c.Stderr = &b
+	var buf bytes.Buffer
+	c.c.Stdout = &buf
+	c.c.Stderr = &buf
 	err := c.run()
-	return b.Bytes(), err
+	return buf.Bytes(), err
 }
 
 func (c *cmd) process() *os.Process {
@@ -267,6 +270,12 @@ type shell struct {
 }
 
 func newShell(opts ShellOpts) (*shell, error) {
+	// Set this process's PGID to its PID so that its child processes can be
+	// identified reliably.
+	// http://man7.org/linux/man-pages/man2/setpgid.2.html
+	if err := syscall.Setpgid(0, 0); err != nil {
+		return nil, err
+	}
 	if !opts.SuppressChildOutput {
 		opts.SuppressChildOutput = os.Getenv("GOSH_SUPPRESS_CHILD_OUTPUT") != ""
 	}
@@ -292,10 +301,7 @@ func newShell(opts ShellOpts) (*shell, error) {
 		}
 	}
 	// Run sh.cleanup() (if needed) when a termination signal is received.
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
-	go func() {
-		sig := <-ch
+	OnTerminationSignal(func(sig os.Signal) {
 		sh.log(false, fmt.Sprintf("Received signal: %v", sig))
 		sh.cleanupLock.Lock()
 		if !sh.calledCleanup {
@@ -306,9 +312,9 @@ func newShell(opts ShellOpts) (*shell, error) {
 			sh.cleanupLock.Unlock()
 		}
 		// http://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
-		// Unfortunately, os.Signal does not expose the signal number.
+		// Unfortunately, os.Signal does not surface the signal number.
 		os.Exit(1)
-	}()
+	})
 	return sh, nil
 }
 
@@ -326,9 +332,11 @@ func (sh *shell) Cmd(env []string, name string, args ...string) Cmd {
 	return sh.cmd(env, name, args...)
 }
 
-func (sh *shell) Fn(env []string, name string, args ...interface{}) Cmd {
+func (sh *shell) Fn(env []string, fn *Fn, args ...interface{}) Cmd {
 	sh.ok()
-	return sh.fn(env, name, args...)
+	res, err := sh.fn(env, fn, args...)
+	sh.setErr(err)
+	return res
 }
 
 func (sh *shell) Set(vars ...string) {
@@ -452,8 +460,18 @@ func (sh *shell) cmd(env []string, name string, args ...string) *cmd {
 	return c
 }
 
-func (sh *shell) fn(env []string, name string, args ...interface{}) *cmd {
-	panic("not implemented")
+func (sh *shell) fn(env []string, fn *Fn, args ...interface{}) (*cmd, error) {
+	// Safeguard against the developer forgetting to call RunFnAndExitIfChild,
+	// which would otherwise lead to recursive invocation of this program.
+	if !calledRunFnAndExitIfChild {
+		return nil, fmt.Errorf("did not call RunFnAndExitIfChild")
+	}
+	b, err := encInvocation(fn.name, args...)
+	if err != nil {
+		return nil, err
+	}
+	env = mapToSlice(mergeMaps(sliceToMap(env), map[string]string{invocationEnv: string(b)}))
+	return sh.cmd(env, os.Args[0]), nil
 }
 
 func (sh *shell) set(vars ...string) {
@@ -561,38 +579,54 @@ func (sh *shell) popd() error {
 	return nil
 }
 
-// forEachRunningProcess applies fn to each running process.
-func (sh *shell) forEachRunningProcess(fn func(*os.Process)) {
+// forEachRunningChild applies fn to each running child process.
+func (sh *shell) forEachRunningChild(fn func(*os.Process)) bool {
+	anyRunning := false
 	for _, c := range sh.cmds {
-		if c.c.ProcessState != nil && c.c.ProcessState.Exited() {
-			return
+		if c.c.Process == nil {
+			continue // not started
 		}
-		if c.c.Process != nil {
-			fn(c.c.Process)
+		if pgid, err := syscall.Getpgid(c.c.Process.Pid); err != nil || pgid != os.Getpid() {
+			continue // not our child
 		}
+		anyRunning = true
+		fn(c.c.Process)
 	}
+	return anyRunning
 }
 
 func (sh *shell) cleanup() {
-	// Terminate all running child processes. Try SIGTERM first; if that doesn't
-	// work, use SIGKILL.
+	// Note, newShell() calls syscall.Setpgid().
+	if os.Getpid() != syscall.Getpgrp() {
+		panic(fmt.Sprint(os.Getpid(), syscall.Getpgrp()))
+	}
+	// Terminate all children that are still running. Try SIGTERM first; if that
+	// doesn't work, use SIGKILL.
 	// https://golang.org/pkg/os/#Process.Signal
-	sh.forEachRunningProcess(func(p *os.Process) {
+	anyRunning := sh.forEachRunningChild(func(p *os.Process) {
 		if err := p.Signal(syscall.SIGTERM); err != nil {
 			sh.log(false, fmt.Sprintf("%d.Signal(SIGTERM) failed: %v", p.Pid, err))
 		}
 	})
-	anyRunning := false
-	sh.forEachRunningProcess(func(p *os.Process) {
-		anyRunning = true
-	})
+	// If any child is still running, wait for 20ms.
 	if anyRunning {
-		// Only sleep if some child process is still running.
-		time.Sleep(time.Second)
-		sh.forEachRunningProcess(func(p *os.Process) {
+		time.Sleep(20 * time.Millisecond)
+		anyRunning = sh.forEachRunningChild(func(p *os.Process) {
+			sh.log(false, fmt.Sprintf("process %d did not die", p.Pid))
+		})
+	}
+	// If any child is still running, wait for another 2s, then send SIGKILL to
+	// all running children.
+	if anyRunning {
+		time.Sleep(2 * time.Second)
+		sh.log(false, "sending SIGKILL to all remaining child processes")
+		sh.forEachRunningChild(func(p *os.Process) {
 			if err := p.Kill(); err != nil {
 				sh.log(false, fmt.Sprintf("%d.Kill() failed: %v", p.Pid, err))
 			}
+		})
+		sh.forEachRunningChild(func(p *os.Process) {
+			sh.log(false, fmt.Sprintf("process %d did not die", p.Pid))
 		})
 	}
 	// Close and delete all temporary files.
@@ -611,4 +645,37 @@ func (sh *shell) cleanup() {
 			sh.log(false, fmt.Sprintf("os.RemoveAll(%q) failed: %v", tempDir, err))
 		}
 	}
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// invocation
+
+type invocation struct {
+	Name string
+	Args []interface{}
+}
+
+// encInvocation encodes an invocation.
+func encInvocation(name string, args ...interface{}) (string, error) {
+	inv := invocation{Name: name, Args: args}
+	buf := new(bytes.Buffer)
+	if err := gob.NewEncoder(buf).Encode(inv); err != nil {
+		return "", fmt.Errorf("failed to encode invocation: %v", err)
+	}
+	// Hex-encode the gob-encoded bytes so that the result can be used as an env
+	// var value.
+	return hex.EncodeToString(buf.Bytes()), nil
+}
+
+// decInvocation decodes an invocation.
+func decInvocation(s string) (name string, args []interface{}, err error) {
+	var inv invocation
+	b, err := hex.DecodeString(s)
+	if err == nil {
+		err = gob.NewDecoder(bytes.NewReader(b)).Decode(&inv)
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to decode invocation: %v", err)
+	}
+	return inv.Name, inv.Args, nil
 }

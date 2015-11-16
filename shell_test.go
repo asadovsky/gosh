@@ -1,9 +1,10 @@
 package gosh_test
 
-// TODO: Add more tests.
+// TODO: Add more tests:
+// - variadic function registration and invocation
 
 import (
-	"fmt"
+	"flag"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/asadovsky/gosh"
+	"github.com/asadovsky/gosh/example/lib"
 )
 
 func fatal(t *testing.T, args ...interface{}) {
@@ -114,21 +116,49 @@ func TestPushdPopd(t *testing.T) {
 	nok(t, sh.Err())
 }
 
-func TestHello(t *testing.T) {
+func TestCmds(t *testing.T) {
 	sh := gosh.NewShell(gosh.ShellOpts{T: t})
 	defer sh.Cleanup()
 
 	// Start server.
-	binPath := sh.BuildGoPkg("github.com/asadovsky/gosh/hello_server")
+	binPath := sh.BuildGoPkg("github.com/asadovsky/gosh/example/server")
 	c := sh.Cmd(nil, binPath)
 	c.Start()
 	c.AwaitReady()
 	addr := c.AwaitVars("Addr")["Addr"]
-	fmt.Println(addr)
+	neq(t, addr, "")
 
 	// Run client.
-	binPath = sh.BuildGoPkg("github.com/asadovsky/gosh/hello_client")
+	binPath = sh.BuildGoPkg("github.com/asadovsky/gosh/example/client")
 	c = sh.Cmd(nil, binPath, "-addr="+addr)
 	output := string(c.Output())
-	fmt.Printf(output)
+	eq(t, output, "Hello, world!\n")
+}
+
+var (
+	get   = gosh.Register("get", lib.Get)
+	serve = gosh.Register("serve", lib.Serve)
+)
+
+func TestFns(t *testing.T) {
+	sh := gosh.NewShell(gosh.ShellOpts{T: t})
+	defer sh.Cleanup()
+
+	// Start server.
+	c := sh.Fn(nil, serve)
+	c.Start()
+	c.AwaitReady()
+	addr := c.AwaitVars("Addr")["Addr"]
+	neq(t, addr, "")
+
+	// Run client.
+	c = sh.Fn(nil, get, addr)
+	output := string(c.Output())
+	eq(t, output, "Hello, world!\n")
+}
+
+func TestMain(m *testing.M) {
+	gosh.RunFnAndExitIfChild()
+	flag.Parse()
+	os.Exit(m.Run())
 }

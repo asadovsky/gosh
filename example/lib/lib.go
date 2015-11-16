@@ -1,13 +1,25 @@
-package main
+package lib
 
 import (
 	"fmt"
+	"io/ioutil"
+	"log"
 	"net"
 	"net/http"
 	"time"
 
 	"github.com/asadovsky/gosh"
 )
+
+func Get(addr string) {
+	resp, err := http.Get("http://" + addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	fmt.Print(string(body))
+}
 
 // Copied from http://golang.org/src/net/http/server.go.
 type tcpKeepAliveListener struct {
@@ -24,13 +36,13 @@ func (ln tcpKeepAliveListener) Accept() (c net.Conn, err error) {
 	return tc, nil
 }
 
-func main() {
-	gosh.WatchParent()
+func Serve() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Hello, world!")
+		fmt.Fprintln(w, "Hello, world!")
 	})
-	// Note, with http.ListenAndServe() there's no easy way to tell which port
-	// number we were assigned.
+	// Note: With http.ListenAndServe() there's no easy way to tell which port
+	// number we were assigned, so instead we use net.Listen() followed by
+	// http.Server.Serve().
 	srv := &http.Server{Addr: "localhost:0"}
 	ln, err := net.Listen("tcp", srv.Addr)
 	if err != nil {

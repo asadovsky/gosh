@@ -1,6 +1,7 @@
 package gosh
 
 import (
+	"log"
 	"os"
 	"testing"
 )
@@ -53,8 +54,8 @@ type Shell interface {
 	// Cmd returns a Cmd.
 	Cmd(env []string, name string, args ...string) Cmd
 
-	// Fn returns a Cmd for the function registered with the given name.
-	Fn(env []string, name string, args ...interface{}) Cmd
+	// Fn returns a Cmd for an invocation of the given registered Fn.
+	Fn(env []string, fn *Fn, args ...interface{}) Cmd
 
 	// Set sets the given env vars, of the form "key=value" or "key=".
 	Set(vars ...string)
@@ -128,4 +129,28 @@ func NewShell(opts ShellOpts) Shell {
 	sh, err := newShell(opts)
 	sh.setErr(err)
 	return sh
+}
+
+var calledRunFnAndExitIfChild = false
+
+// RunFnAndExitIfChild should be called first thing in main() or TestMain(),
+// before flags are parsed. In the parent process, it returns immediately with
+// no effect. In a child process for a Shell.Fn() command, it runs the specified
+// function, then exits.
+func RunFnAndExitIfChild() {
+	calledRunFnAndExitIfChild = true
+	s := os.Getenv(invocationEnv)
+	if s == "" {
+		return
+	}
+	WatchParent()
+	ExitOnTerminationSignal()
+	if name, args, err := decInvocation(s); err != nil {
+		log.Fatal(err)
+	} else {
+		if err := Call(name, args...); err != nil {
+			log.Fatal(err)
+		}
+		os.Exit(0)
+	}
 }

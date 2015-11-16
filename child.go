@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -53,4 +55,24 @@ func WatchParent() {
 			time.Sleep(time.Second)
 		}
 	}()
+}
+
+// OnTerminationSignal starts a goroutine that listens for various termination
+// signals and calls the given function when such a signal is received.
+func OnTerminationSignal(fn func(os.Signal)) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	go func() {
+		fn(<-ch)
+	}()
+}
+
+// ExitOnTerminationSignal starts a goroutine that calls os.Exit(1) when a
+// termination signal is received.
+func ExitOnTerminationSignal() {
+	OnTerminationSignal(func(os.Signal) {
+		// http://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
+		// Unfortunately, os.Signal does not surface the signal number.
+		os.Exit(1)
+	})
 }
