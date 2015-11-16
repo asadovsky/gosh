@@ -2,6 +2,11 @@ package gosh_test
 
 // TODO: Add more tests:
 // - variadic function registration and invocation
+// - shell cleanup
+// - Cmd.{Wait,Run,CombinedOutput}
+// - Shell.{AppendArgs,Wait,MakeTempFile,MakeTempDir}
+// - ShellOpts (including defaulting behavior)
+// - WatchParent, OnTerminationSignal
 
 import (
 	"flag"

@@ -186,6 +186,8 @@ func (c *cmd) start() error {
 			return err
 		}
 	}
+	// TODO: Wrap every child process with a "supervisor" process that calls
+	// WatchParent().
 	return c.c.Start()
 }
 
@@ -615,10 +617,10 @@ func (sh *shell) cleanup() {
 			sh.log(false, fmt.Sprintf("process %d did not die", p.Pid))
 		})
 	}
-	// If any child is still running, wait for another 2s, then send SIGKILL to
-	// all running children.
+	// If any child is still running, wait for another second, then send SIGKILL
+	// to all running children.
 	if anyRunning {
-		time.Sleep(2 * time.Second)
+		time.Sleep(time.Second)
 		sh.log(false, "sending SIGKILL to all remaining child processes")
 		sh.forEachRunningChild(func(p *os.Process) {
 			if err := p.Kill(); err != nil {
