@@ -1,6 +1,7 @@
 package gosh
 
 import (
+	"io"
 	"log"
 	"os"
 	"testing"
@@ -11,6 +12,16 @@ import (
 // the Shell.
 // Not thread-safe.
 type Cmd interface {
+	// Stdout returns a buffer-backed Reader for this command's stdout. Must be
+	// called before Start. May be called more than once; each invocation creates
+	// a new buffer.
+	Stdout() io.Reader
+
+	// Stderr returns a buffer-backed Reader for this command's stderr. Must be
+	// called before Start. May be called more than once; each invocation creates
+	// a new buffer.
+	Stderr() io.Reader
+
 	// Start starts this command. May produce an error.
 	Start()
 
@@ -23,18 +34,18 @@ type Cmd interface {
 	// produce an error.
 	AwaitVars(keys ...string) map[string]string
 
-	// Wait waits for this command to complete. May produce an error.
+	// Wait waits for this command to exit. May produce an error.
 	Wait()
 
-	// Run starts this command and waits for it to complete. May produce an error.
+	// Run calls Start followed by Wait. May produce an error.
 	Run()
 
-	// Output runs this command and returns its standard output. May produce an
-	// error.
+	// Output calls Start followed by Wait, then returns this command's stdout.
+	// May produce an error.
 	Output() []byte
 
-	// CombinedOutput runs this command and returns its combined standard output
-	// and standard error. May produce an error.
+	// CombinedOutput calls Start followed by Wait, then returns this command's
+	// combined stdout and stderr. May produce an error.
 	CombinedOutput() []byte
 
 	// Process returns the underlying process handle for this command.
@@ -71,8 +82,8 @@ type Shell interface {
 	// to all child processes.
 	AppendArgs(args ...string)
 
-	// Wait waits for all commands started by this Shell to complete. Produces an
-	// error if any individual command's Wait() failed.
+	// Wait waits for all commands started by this Shell to exit. Produces an
+	// error if any individual command's Wait failed.
 	Wait()
 
 	// BuildGoPkg compiles a Go package using the "go build" command and writes
@@ -106,9 +117,9 @@ type ShellOpts struct {
 	// If not nil, errors trigger T.Fatal instead of panic.
 	T *testing.T
 	// If true, errors are logged but do not trigger T.Fatal or panic. Errors can
-	// be accessed via Err(). Shell and Cmd interface comments specify which
+	// be accessed via Shell.Err(). Shell and Cmd interface comments specify which
 	// methods can produce errors. All Shell and Cmd methods except Shell.Err()
-	// and Shell.Cleanup() panic if Err() is not nil.
+	// and Shell.Cleanup() panic if Shell.Err() is not nil.
 	NoDieOnErr bool
 	// By default, child stdout and stderr are propagated up to the parent's
 	// stdout and stderr. If SuppressChildOutput is true, child stdout and stderr

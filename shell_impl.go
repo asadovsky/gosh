@@ -25,23 +25,46 @@ const invocationEnv = "GOSH_INVOCATION"
 // Cmd
 
 type cmd struct {
-	c           *exec.Cmd
-	sh          *shell
-	calledStart bool
-	condReady   *sync.Cond
-	ready       bool // protected by condReady.L
-	condVars    *sync.Cond
-	vars        map[string]string // protected by condVars.L
+	c             *exec.Cmd
+	sh            *shell
+	calledStart   bool
+	stdoutWriters []io.Writer
+	stderrWriters []io.Writer
+	condReady     *sync.Cond
+	ready         bool // protected by condReady.L
+	condVars      *sync.Cond
+	vars          map[string]string // protected by condVars.L
 }
 
 func newCmd(sh *shell, name string, args ...string) *cmd {
 	return &cmd{
-		c:         exec.Command(name, args...),
-		sh:        sh,
-		condReady: sync.NewCond(&sync.Mutex{}),
-		condVars:  sync.NewCond(&sync.Mutex{}),
-		vars:      map[string]string{},
+		c:             exec.Command(name, args...),
+		sh:            sh,
+		stdoutWriters: []io.Writer{},
+		stderrWriters: []io.Writer{},
+		condReady:     sync.NewCond(&sync.Mutex{}),
+		condVars:      sync.NewCond(&sync.Mutex{}),
+		vars:          map[string]string{},
 	}
+}
+
+func (c *cmd) addWriter(writers *[]io.Writer, w io.Writer) {
+	*writers = append(*writers, w)
+	if f, ok := w.(*os.File); ok {
+		c.c.ExtraFiles = append(c.c.ExtraFiles, f)
+	}
+}
+
+func (c *cmd) Stdout() io.Reader {
+	var buf bytes.Buffer
+	c.addWriter(&c.stdoutWriters, &buf)
+	return &buf
+}
+
+func (c *cmd) Stderr() io.Reader {
+	var buf bytes.Buffer
+	c.addWriter(&c.stderrWriters, &buf)
+	return &buf
 }
 
 func (c *cmd) Start() {
@@ -141,50 +164,51 @@ func (w *recvWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// TODO: Make errors bubble up to Await*() in addition to Wait().
-func (c *cmd) newMultiWriter(t string, f *os.File) (io.Writer, error) {
-	writers := []io.Writer{}
-	push := func(f *os.File) {
-		writers = append(writers, f)
-		c.c.ExtraFiles = append(c.c.ExtraFiles, f)
+func (c *cmd) initMultiWriter(f *os.File, t string) (io.Writer, error) {
+	var writers *[]io.Writer
+	if f == os.Stdout {
+		writers = &c.stdoutWriters
+	} else {
+		writers = &c.stderrWriters
 	}
 	if !c.sh.opts.SuppressChildOutput {
-		push(f)
+		c.addWriter(writers, f)
 	}
-	dir := c.sh.opts.ChildOutputDir
-	if dir != "" {
+	if c.sh.opts.ChildOutputDir != "" {
 		suffix := "stderr"
 		if f == os.Stdout {
 			suffix = "stdout"
 		}
-		name := filepath.Join(dir, filepath.Base(c.c.Path)+"."+t+"."+suffix)
+		name := filepath.Join(c.sh.opts.ChildOutputDir, filepath.Base(c.c.Path)+"."+t+"."+suffix)
 		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
 			return nil, err
 		}
-		push(f)
+		c.addWriter(writers, f)
 	}
 	if f == os.Stdout {
-		writers = append(writers, &recvWriter{c: c})
+		c.addWriter(writers, &recvWriter{c: c})
 	}
-	return io.MultiWriter(writers...), nil
+	return io.MultiWriter(*writers...), nil
 }
 
+// TODO: Make errors bubble up to Await*() in addition to Wait().
 func (c *cmd) start() error {
 	if c.calledStart {
 		return fmt.Errorf("already called start")
 	}
 	c.calledStart = true
-	if c.c.Stdout == nil && c.c.Stderr == nil {
-		// Set up stdout and stderr.
-		t := time.Now().UTC().Format("20060102.150405.999")
-		var err error
-		if c.c.Stdout, err = c.newMultiWriter(t, os.Stdout); err != nil {
-			return err
-		}
-		if c.c.Stderr, err = c.newMultiWriter(t, os.Stderr); err != nil {
-			return err
-		}
+	if c.c.Stdout != nil || c.c.Stderr != nil { // invariant check
+		log.Fatal(c.c.Stdout, c.c.Stderr)
+	}
+	// Set up stdout and stderr.
+	t := time.Now().UTC().Format("20060102.150405.999")
+	var err error
+	if c.c.Stdout, err = c.initMultiWriter(os.Stdout, t); err != nil {
+		return err
+	}
+	if c.c.Stderr, err = c.initMultiWriter(os.Stderr, t); err != nil {
+		return err
 	}
 	// TODO: Wrap every child process with a "supervisor" process that calls
 	// WatchParent().
@@ -238,15 +262,15 @@ func (c *cmd) run() error {
 
 func (c *cmd) output() ([]byte, error) {
 	var buf bytes.Buffer
-	c.c.Stdout = &buf
+	c.addWriter(&c.stdoutWriters, &buf)
 	err := c.run()
 	return buf.Bytes(), err
 }
 
 func (c *cmd) combinedOutput() ([]byte, error) {
 	var buf bytes.Buffer
-	c.c.Stdout = &buf
-	c.c.Stderr = &buf
+	c.addWriter(&c.stdoutWriters, &buf)
+	c.addWriter(&c.stderrWriters, &buf)
 	err := c.run()
 	return buf.Bytes(), err
 }

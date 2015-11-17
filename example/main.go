@@ -8,7 +8,7 @@ import (
 )
 
 func ExampleCmds() {
-	sh := gosh.NewShell(gosh.ShellOpts{})
+	sh := gosh.NewShell(gosh.ShellOpts{SuppressChildOutput: true})
 	defer sh.Cleanup()
 
 	// Start server.
@@ -32,7 +32,7 @@ var (
 )
 
 func ExampleFns() {
-	sh := gosh.NewShell(gosh.ShellOpts{})
+	sh := gosh.NewShell(gosh.ShellOpts{SuppressChildOutput: true})
 	defer sh.Cleanup()
 
 	// Start server.
