@@ -25,7 +25,7 @@ const invocationEnv = "GOSH_INVOCATION"
 ////////////////////////////////////////////////////////////////////////////////
 // Cmd
 
-// TODO(sadovsky): Add timeout to AwaitReady, AwaitVars, Wait, Run, etc.
+// TODO: Add timeout to AwaitReady, AwaitVars, Wait, Run, etc.
 
 // Cmd represents a command.
 // All configuration of env vars and args for this command should be done via
