@@ -55,7 +55,7 @@ func neq(t *testing.T, got, notWant interface{}) {
 	}
 }
 
-func env(sh gosh.Shell) string {
+func env(sh *gosh.Shell) string {
 	return strings.Join(sh.Env(), " ")
 }
 
