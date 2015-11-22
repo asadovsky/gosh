@@ -20,7 +20,17 @@ import (
 	"time"
 )
 
-const invocationEnv = "GOSH_INVOCATION"
+const (
+	envBinDir              = "GOSH_BIN_DIR"
+	envChildOutputDir      = "GOSH_CHILD_OUTPUT_DIR"
+	envInvocation          = "GOSH_INVOCATION"
+	envSuppressChildOutput = "GOSH_SUPPRESS_CHILD_OUTPUT"
+)
+
+var (
+	alreadyCalledCleanup = fmt.Errorf("already called cleanup")
+	alreadyCalledStart   = fmt.Errorf("already called start")
+)
 
 ////////////////////////////////////////////////////////////////////////////////
 // Cmd
@@ -136,8 +146,6 @@ func newCmd(sh *Shell, name string, args ...string) *Cmd {
 		vars:          map[string]string{},
 	}
 }
-
-var alreadyCalledStart = fmt.Errorf("already called start")
 
 func (c *Cmd) addWriter(writers *[]io.Writer, w io.Writer) {
 	*writers = append(*writers, w)
@@ -340,7 +348,8 @@ type Shell struct {
 	cmds          []*Cmd
 	tempFiles     []*os.File
 	tempDirs      []string
-	dirStack      []string   // for pushd/popd
+	dirStack      []string // for pushd/popd
+	cleanupFns    []func()
 	cleanupLock   sync.Mutex // protects calledCleanup
 	calledCleanup bool
 }
@@ -349,10 +358,10 @@ type Shell struct {
 type ShellOpts struct {
 	// If not nil, errors trigger T.Fatal instead of panic.
 	T *testing.T
-	// If true, errors are logged but do not trigger T.Fatal or panic. Errors can
-	// be accessed via Shell.Err(). Shell and Cmd interface comments specify which
-	// methods can produce errors. All Shell and Cmd methods except Shell.Err()
-	// and Shell.Cleanup() panic if Shell.Err() is not nil.
+	// If true, errors are logged but are not fatal. Errors can be accessed via
+	// Shell.Err(). Comments specify which Shell and Cmd methods may produce
+	// errors. All methods except Shell.{Err,SetErr,ClearErr,Cleanup} panic if
+	// Shell.Err() is not nil.
 	NoDieOnErr bool
 	// By default, child stdout and stderr are propagated up to the parent's
 	// stdout and stderr. If SuppressChildOutput is true, child stdout and stderr
@@ -375,7 +384,12 @@ func NewShell(opts ShellOpts) *Shell {
 	return sh
 }
 
-// SetErr sets the given error. Consequent behavior depends on ShellOpts.
+// Err returns the error, which may be nil.
+func (sh *Shell) Err() error {
+	return sh.err
+}
+
+// SetErr sets the error.
 func (sh *Shell) SetErr(err error) {
 	if err == nil || sh.err != nil {
 		return
@@ -393,13 +407,14 @@ func (sh *Shell) SetErr(err error) {
 	}
 }
 
-// Err returns the most recent error, if any.
-func (sh *Shell) Err() error {
-	return sh.err
+// ClearErr clears the error.
+func (sh *Shell) ClearErr() {
+	sh.err = nil
 }
 
 // Opts returns the ShellOpts for this Shell, with default values filled in.
 func (sh *Shell) Opts() ShellOpts {
+	sh.ok()
 	return sh.opts
 }
 
@@ -497,11 +512,17 @@ func (sh *Shell) Popd() {
 func (sh *Shell) Cleanup() {
 	sh.cleanupLock.Lock()
 	if sh.calledCleanup {
-		panic("already called cleanup")
+		panic(alreadyCalledCleanup)
 	}
 	sh.calledCleanup = true
 	sh.cleanupLock.Unlock()
 	sh.cleanup()
+}
+
+// AddToCleanup registers the given function to be called by Shell.Cleanup().
+func (sh *Shell) AddToCleanup(fn func()) {
+	sh.ok()
+	sh.cleanupFns = append(sh.cleanupFns, fn)
 }
 
 ////////////////////////////////////////
@@ -515,10 +536,10 @@ func newShell(opts ShellOpts) (*Shell, error) {
 		return nil, err
 	}
 	if !opts.SuppressChildOutput {
-		opts.SuppressChildOutput = os.Getenv("GOSH_SUPPRESS_CHILD_OUTPUT") != ""
+		opts.SuppressChildOutput = os.Getenv(envSuppressChildOutput) != ""
 	}
 	if opts.ChildOutputDir == "" {
-		opts.ChildOutputDir = os.Getenv("GOSH_CHILD_OUTPUT_DIR")
+		opts.ChildOutputDir = os.Getenv(envChildOutputDir)
 	}
 	sh := &Shell{
 		opts:      opts,
@@ -530,7 +551,7 @@ func newShell(opts ShellOpts) (*Shell, error) {
 		dirStack:  []string{},
 	}
 	if sh.opts.BinDir == "" {
-		sh.opts.BinDir = os.Getenv("GOSH_BIN_DIR")
+		sh.opts.BinDir = os.Getenv(envBinDir)
 		if sh.opts.BinDir == "" {
 			var err error
 			if sh.opts.BinDir, err = sh.makeTempDir(); err != nil {
@@ -538,7 +559,7 @@ func newShell(opts ShellOpts) (*Shell, error) {
 			}
 		}
 	}
-	// Run sh.cleanup() (if needed) when a termination signal is received.
+	// Call sh.cleanup() if needed when a termination signal is received.
 	OnTerminationSignal(func(sig os.Signal) {
 		sh.log(false, fmt.Sprintf("Received signal: %v", sig))
 		sh.cleanupLock.Lock()
@@ -575,7 +596,7 @@ func (sh *Shell) ok() {
 	}
 	sh.cleanupLock.Lock()
 	if sh.calledCleanup {
-		panic("already called cleanup")
+		panic(alreadyCalledCleanup)
 	}
 	sh.cleanupLock.Unlock()
 }
@@ -597,7 +618,7 @@ func (sh *Shell) fn(env []string, fn *Fn, args ...interface{}) (*Cmd, error) {
 	if err != nil {
 		return nil, err
 	}
-	env = mapToSlice(mergeMaps(sliceToMap(env), map[string]string{invocationEnv: string(b)}))
+	env = mapToSlice(mergeMaps(sliceToMap(env), map[string]string{envInvocation: string(b)}))
 	return sh.cmd(env, os.Args[0]), nil
 }
 
@@ -772,6 +793,10 @@ func (sh *Shell) cleanup() {
 			sh.log(false, fmt.Sprintf("os.RemoveAll(%q) failed: %v", tempDir, err))
 		}
 	}
+	// Call any registered cleanup functions in LIFO order.
+	for i := len(sh.cleanupFns) - 1; i >= 0; i-- {
+		sh.cleanupFns[i]()
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -785,7 +810,7 @@ var calledRunFnAndExitIfChild = false
 // function, then exits.
 func RunFnAndExitIfChild() {
 	calledRunFnAndExitIfChild = true
-	s := os.Getenv(invocationEnv)
+	s := os.Getenv(envInvocation)
 	if s == "" {
 		return
 	}
