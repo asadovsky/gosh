@@ -415,7 +415,7 @@ func (sh *Shell) SetErr(err error) {
 	}
 	sh.err = err
 	if sh.opts.NoDieOnErr {
-		sh.log(true, err.Error())
+		sh.errorf(err.Error())
 	} else {
 		if sh.opts.T == nil {
 			panic(err)
@@ -592,7 +592,7 @@ func newShell(opts ShellOpts) (*Shell, error) {
 	}
 	// Call sh.cleanup() if needed when a termination signal is received.
 	OnTerminationSignal(func(sig os.Signal) {
-		sh.log(false, fmt.Sprintf("Received signal: %v", sig))
+		sh.warningf("Received signal: %v", sig)
 		sh.cleanupMu.Lock()
 		if !sh.calledCleanup {
 			sh.calledCleanup = true
@@ -608,17 +608,20 @@ func newShell(opts ShellOpts) (*Shell, error) {
 	return sh, nil
 }
 
-func (sh *Shell) log(severe bool, msg string) {
-	prefix := "WARNING"
-	if severe {
-		prefix = "ERROR"
-	}
-	msg = fmt.Sprintf("%s: %s\n", prefix, msg)
+func (sh *Shell) log(args ...interface{}) {
 	if sh.opts.T == nil {
-		log.Print(msg)
+		log.Print(args...)
 	} else {
-		sh.opts.T.Log(msg)
+		sh.opts.T.Log(args...)
 	}
+}
+
+func (sh *Shell) warningf(format string, args ...interface{}) {
+	sh.log(fmt.Sprintf("WARNING: %s\n", fmt.Sprintf(format, args...)))
+}
+
+func (sh *Shell) errorf(format string, args ...interface{}) {
+	sh.log(fmt.Sprintf("ERROR: %s\n", fmt.Sprintf(format, args...)))
 }
 
 func (sh *Shell) ok() {
@@ -643,7 +646,7 @@ func (sh *Shell) fn(env []string, fn *Fn, args ...interface{}) (*Cmd, error) {
 	// Safeguard against the developer forgetting to call RunFnAndExitIfChild,
 	// which would otherwise lead to recursive invocation of this program.
 	if !calledRunFnAndExitIfChild {
-		return nil, fmt.Errorf("did not call RunFnAndExitIfChild")
+		return nil, errors.New("did not call RunFnAndExitIfChild")
 	}
 	b, err := encInvocation(fn.name, args...)
 	if err != nil {
@@ -691,7 +694,7 @@ func (sh *Shell) wait() error {
 			continue
 		}
 		if err := c.wait(); err != nil {
-			sh.log(true, fmt.Sprintf("Cmd.Wait() failed: %v", err))
+			sh.errorf("Cmd.Wait() failed: %v", err)
 			if res == nil {
 				res = err
 			}
@@ -759,7 +762,7 @@ func (sh *Shell) pushd(dir string) error {
 
 func (sh *Shell) popd() error {
 	if len(sh.dirStack) == 0 {
-		return fmt.Errorf("dir stack is empty")
+		return errors.New("dir stack is empty")
 	}
 	dir := sh.dirStack[len(sh.dirStack)-1]
 	if err := os.Chdir(dir); err != nil {
@@ -769,8 +772,8 @@ func (sh *Shell) popd() error {
 	return nil
 }
 
-// forEachRunningChild applies fn to each running child process.
-func (sh *Shell) forEachRunningChild(fn func(*os.Process)) bool {
+// forEachRunningCmd applies fn to each running child process.
+func (sh *Shell) forEachRunningCmd(fn func(*Cmd)) bool {
 	anyRunning := false
 	for _, c := range sh.cmds {
 		if c.c.Process == nil {
@@ -780,7 +783,7 @@ func (sh *Shell) forEachRunningChild(fn func(*os.Process)) bool {
 			continue // not our child
 		}
 		anyRunning = true
-		fn(c.c.Process)
+		fn(c)
 	}
 	return anyRunning
 }
@@ -793,46 +796,46 @@ func (sh *Shell) cleanup() {
 	// Terminate all children that are still running. Try SIGTERM first; if that
 	// doesn't work, use SIGKILL.
 	// https://golang.org/pkg/os/#Process.Signal
-	anyRunning := sh.forEachRunningChild(func(p *os.Process) {
-		if err := p.Signal(syscall.SIGTERM); err != nil {
-			sh.log(false, fmt.Sprintf("%d.Signal(SIGTERM) failed: %v", p.Pid, err))
+	anyRunning := sh.forEachRunningCmd(func(c *Cmd) {
+		if err := c.process().Signal(syscall.SIGTERM); err != nil {
+			sh.warningf("%d.Signal(SIGTERM) failed: %v", c.process().Pid, err)
 		}
 	})
-	// If any child is still running, wait for 20ms.
+	// If any child is still running, wait for 50ms.
 	if anyRunning {
-		time.Sleep(20 * time.Millisecond)
-		anyRunning = sh.forEachRunningChild(func(p *os.Process) {
-			sh.log(false, fmt.Sprintf("process %d did not die", p.Pid))
+		time.Sleep(50 * time.Millisecond)
+		anyRunning = sh.forEachRunningCmd(func(c *Cmd) {
+			sh.warningf("%s (PID %d) did not die", c.c.Path, c.process().Pid)
 		})
 	}
 	// If any child is still running, wait for another second, then send SIGKILL
 	// to all running children.
 	if anyRunning {
 		time.Sleep(time.Second)
-		sh.log(false, "sending SIGKILL to all remaining child processes")
-		sh.forEachRunningChild(func(p *os.Process) {
-			if err := p.Kill(); err != nil {
-				sh.log(false, fmt.Sprintf("%d.Kill() failed: %v", p.Pid, err))
+		sh.warningf("sending SIGKILL to all remaining child processes")
+		sh.forEachRunningCmd(func(c *Cmd) {
+			if err := c.process().Kill(); err != nil {
+				sh.warningf("%d.Kill() failed: %v", c.process().Pid, err)
 			}
 		})
-		sh.forEachRunningChild(func(p *os.Process) {
-			sh.log(false, fmt.Sprintf("process %d did not die", p.Pid))
+		sh.forEachRunningCmd(func(c *Cmd) {
+			sh.warningf("%s (PID %d) did not die", c.c.Path, c.process().Pid)
 		})
 	}
 	// Close and delete all temporary files.
 	for _, tempFile := range sh.tempFiles {
 		name := tempFile.Name()
 		if err := tempFile.Close(); err != nil {
-			sh.log(false, fmt.Sprintf("%q.Close() failed: %v", name, err))
+			sh.warningf("%q.Close() failed: %v", name, err)
 		}
 		if err := os.RemoveAll(name); err != nil {
-			sh.log(false, fmt.Sprintf("os.RemoveAll(%q) failed: %v", name, err))
+			sh.warningf("os.RemoveAll(%q) failed: %v", name, err)
 		}
 	}
 	// Delete all temporary directories.
 	for _, tempDir := range sh.tempDirs {
 		if err := os.RemoveAll(tempDir); err != nil {
-			sh.log(false, fmt.Sprintf("os.RemoveAll(%q) failed: %v", tempDir, err))
+			sh.warningf("os.RemoveAll(%q) failed: %v", tempDir, err)
 		}
 	}
 	// Call any registered cleanup functions in LIFO order.
