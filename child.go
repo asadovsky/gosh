@@ -45,7 +45,7 @@ func SendVars(vars map[string]string) {
 }
 
 // WatchParent starts a goroutine that periodically checks whether the parent
-// process has exited and, if so, kills this process.
+// process has exited and, if so, kills the current process.
 func WatchParent() {
 	go func() {
 		for {

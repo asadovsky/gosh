@@ -849,7 +849,7 @@ func (sh *Shell) cleanup() {
 
 var calledRunFnAndExitIfChild = false
 
-// RunFnAndExitIfChild should be called first thing in main() or TestMain(),
+// RunFnAndExitIfChild must be called first thing in main() or TestMain(),
 // before flags are parsed. In the parent process, it returns immediately with
 // no effect. In a child process for a Shell.Fn() command, it runs the specified
 // function, then exits.

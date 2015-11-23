@@ -8,6 +8,7 @@ import (
 	"reflect"
 )
 
+// Fn is a registered, callable function.
 type Fn struct {
 	name  string
 	value reflect.Value
@@ -18,9 +19,10 @@ var (
 	errorType = reflect.TypeOf((*error)(nil)).Elem()
 )
 
-// TODO: Switch to using len(fns) as name, and maybe drop the name argument, if
-// it turns out that initialization order is deterministic.
+// Register registers the given function.
 func Register(name string, i interface{}) *Fn {
+	// TODO: Switch to using len(fns) as name, and maybe drop the name argument,
+	// if it turns out that initialization order is deterministic.
 	if _, ok := fns[name]; ok {
 		panic(fmt.Errorf("already registered: %s", name))
 	}
@@ -47,6 +49,7 @@ func Register(name string, i interface{}) *Fn {
 	return fn
 }
 
+// Call calls the named function, which must have been registered.
 func Call(name string, args ...interface{}) error {
 	if fn, ok := fns[name]; !ok {
 		return fmt.Errorf("unknown function: %s", name)
@@ -55,6 +58,7 @@ func Call(name string, args ...interface{}) error {
 	}
 }
 
+// Call calls the function fn with the input arguments args.
 func (fn *Fn) Call(args ...interface{}) error {
 	t := fn.value.Type()
 	in := []reflect.Value{}
