@@ -74,7 +74,7 @@ func (fn *Fn) Call(args ...interface{}) error {
 		in = append(in, av)
 	}
 	out := fn.value.Call(in)
-	if t.NumOut() == 1 {
+	if t.NumOut() == 1 && !out[0].IsNil() {
 		return out[0].Interface().(error)
 	}
 	return nil

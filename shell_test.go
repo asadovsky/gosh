@@ -9,7 +9,8 @@ package gosh_test
 // - WatchParent, OnTerminationSignal
 
 import (
-	"flag"
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -162,8 +163,45 @@ func TestFns(t *testing.T) {
 	eq(t, output, "Hello, world!\n")
 }
 
+var write = gosh.Register("write", func(s string, stdout bool) error {
+	var f *os.File
+	if stdout {
+		f = os.Stdout
+	} else {
+		f = os.Stderr
+	}
+	_, err := f.Write([]byte(s))
+	return err
+})
+
+func toString(r io.Reader) string {
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(r)
+	return buf.String()
+}
+
+func TestStdoutStderr(t *testing.T) {
+	sh := gosh.NewShell(gosh.ShellOpts{T: t})
+	defer sh.Cleanup()
+	s := "TestStdoutStderr\n"
+
+	// Stdout
+	c := sh.Fn(nil, write, s, true)
+	stdout, stderr := c.Stdout(), c.Stderr()
+	output := string(c.CombinedOutput())
+	eq(t, output, s)
+	eq(t, toString(stdout), s)
+	eq(t, toString(stderr), "")
+
+	// Stderr
+	c = sh.Fn(nil, write, s, false)
+	stdout, stderr = c.Stdout(), c.Stderr()
+	output = string(c.CombinedOutput())
+	eq(t, output, s)
+	eq(t, toString(stdout), "")
+	eq(t, toString(stderr), s)
+}
+
 func TestMain(m *testing.M) {
-	gosh.RunFnAndExitIfChild()
-	flag.Parse()
-	os.Exit(m.Run())
+	os.Exit(gosh.Run(m))
 }
