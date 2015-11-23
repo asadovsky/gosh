@@ -65,28 +65,32 @@ func TestEnv(t *testing.T) {
 	defer sh.Cleanup()
 	eq(t, sh.Get("FOO"), "")
 	eq(t, env(sh), "")
-	sh.Set("FOO=1")
+	sh.Set("FOO", "1")
 	eq(t, sh.Get("FOO"), "1")
 	eq(t, sh.Get("BAR"), "") // not in env
 	eq(t, env(sh), "FOO=1")
-	sh.Set("BAR=2")
+	sh.Set("BAR", "2")
 	eq(t, sh.Get("FOO"), "1")
 	eq(t, sh.Get("BAR"), "2")
 	eq(t, env(sh), "BAR=2 FOO=1")
-	sh.Set("FOO=0")
+	sh.SetMany("FOO=0")
 	eq(t, env(sh), "BAR=2 FOO=0")
-	sh.Set("FOO=3", "BAR=4", "BAZ=5")
+	sh.SetMany("FOO=3", "BAR=4", "BAZ=5")
 	eq(t, env(sh), "BAR=4 BAZ=5 FOO=3")
-	sh.Set("FOO=", "BAR=6", "BAZ=") // unset FOO and BAZ
+	sh.SetMany("FOO=", "BAR=6", "BAZ=") // unset FOO and BAZ
 	eq(t, env(sh), "BAR=6")
+	sh.Unset("FOO")
+	eq(t, env(sh), "BAR=6")
+	sh.Unset("BAR")
+	eq(t, env(sh), "")
 }
 
 func TestEnvSort(t *testing.T) {
 	sh := gosh.NewShell(gosh.ShellOpts{T: t})
 	defer sh.Cleanup()
-	sh.Set("FOO4=4")
-	sh.Set("FOO=bar")
-	sh.Set("FOOD=D")
+	sh.Set("FOO4", "4")
+	sh.Set("FOO", "bar")
+	sh.Set("FOOD", "D")
 	eq(t, env(sh), "FOO=bar FOO4=4 FOOD=D")
 }
 

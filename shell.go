@@ -34,9 +34,7 @@ var (
 	errAlreadyCalledWait    = errors.New("already called wait")
 )
 
-// TODO:
-// - Revisit env var API, maybe switch to Set(key, value)
-// - Add timeout to AwaitReady, AwaitVars, Wait, Run, etc.
+// TODO: Add timeout to AwaitReady, AwaitVars, Wait, Run, etc.
 
 ////////////////////////////////////////////////////////////////////////////////
 // Cmd
@@ -453,16 +451,28 @@ func (sh *Shell) Fn(env []string, fn *Fn, args ...interface{}) *Cmd {
 	return res
 }
 
-// Set sets the given env vars, of the form "key=value" or "key=".
-func (sh *Shell) Set(vars ...string) {
-	sh.ok()
-	sh.set(vars...)
-}
-
 // Get returns the value of the given env var.
 func (sh *Shell) Get(key string) string {
 	sh.ok()
 	return sh.get(key)
+}
+
+// Set sets the given env var.
+func (sh *Shell) Set(key, value string) {
+	sh.ok()
+	sh.set(key, value)
+}
+
+// Unset unsets the given env var.
+func (sh *Shell) Unset(key string) {
+	sh.ok()
+	sh.unset(key)
+}
+
+// SetMany sets the given env vars, of the form "key=value" or "key=".
+func (sh *Shell) SetMany(vars ...string) {
+	sh.ok()
+	sh.setMany(vars...)
 }
 
 // Env returns this Shell's env vars, excluding preexisting vars.
@@ -643,7 +653,15 @@ func (sh *Shell) fn(env []string, fn *Fn, args ...interface{}) (*Cmd, error) {
 	return sh.cmd(env, os.Args[0]), nil
 }
 
-func (sh *Shell) set(vars ...string) {
+func (sh *Shell) get(key string) string {
+	return sh.vars[key]
+}
+
+func (sh *Shell) set(key, value string) {
+	sh.vars[key] = value
+}
+
+func (sh *Shell) setMany(vars ...string) {
 	for _, kv := range vars {
 		k, v := splitKeyValue(kv)
 		if v == "" {
@@ -654,8 +672,8 @@ func (sh *Shell) set(vars ...string) {
 	}
 }
 
-func (sh *Shell) get(key string) string {
-	return sh.vars[key]
+func (sh *Shell) unset(key string) {
+	delete(sh.vars, key)
 }
 
 func (sh *Shell) env() []string {
