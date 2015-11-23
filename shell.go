@@ -35,7 +35,9 @@ var (
 ////////////////////////////////////////////////////////////////////////////////
 // Cmd
 
-// TODO: Add timeout to AwaitReady, AwaitVars, Wait, Run, etc.
+// TODO:
+// - Revisit env var API, maybe switch to Set(key, value)
+// - Add timeout to AwaitReady, AwaitVars, Wait, Run, etc.
 
 // Cmd represents a command.
 // All configuration of env vars and args for this command should be done via
@@ -439,9 +441,9 @@ func (sh *Shell) Set(vars ...string) {
 }
 
 // Get returns the value of the given env var.
-func (sh *Shell) Get(name string) string {
+func (sh *Shell) Get(key string) string {
 	sh.ok()
-	return sh.get(name)
+	return sh.get(key)
 }
 
 // Env returns this Shell's env vars, excluding preexisting vars.
@@ -633,8 +635,8 @@ func (sh *Shell) set(vars ...string) {
 	}
 }
 
-func (sh *Shell) get(name string) string {
-	return sh.vars[name]
+func (sh *Shell) get(key string) string {
+	return sh.vars[key]
 }
 
 func (sh *Shell) env() []string {
