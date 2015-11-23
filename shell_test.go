@@ -185,7 +185,7 @@ func TestStdoutStderr(t *testing.T) {
 	defer sh.Cleanup()
 	s := "TestStdoutStderr\n"
 
-	// Stdout
+	// Write to stdout.
 	c := sh.Fn(nil, write, s, true)
 	stdout, stderr := c.Stdout(), c.Stderr()
 	output := string(c.CombinedOutput())
@@ -193,7 +193,7 @@ func TestStdoutStderr(t *testing.T) {
 	eq(t, toString(stdout), s)
 	eq(t, toString(stderr), "")
 
-	// Stderr
+	// Write to stderr.
 	c = sh.Fn(nil, write, s, false)
 	stdout, stderr = c.Stdout(), c.Stderr()
 	output = string(c.CombinedOutput())

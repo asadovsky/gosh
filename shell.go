@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -28,36 +29,39 @@ const (
 )
 
 var (
-	alreadyCalledCleanup = fmt.Errorf("already called cleanup")
-	alreadyCalledStart   = fmt.Errorf("already called start")
+	errAlreadyCalledCleanup = errors.New("already called cleanup")
+	errAlreadyCalledStart   = errors.New("already called start")
+	errAlreadyCalledWait    = errors.New("already called wait")
 )
-
-////////////////////////////////////////////////////////////////////////////////
-// Cmd
 
 // TODO:
 // - Revisit env var API, maybe switch to Set(key, value)
 // - Add timeout to AwaitReady, AwaitVars, Wait, Run, etc.
+
+////////////////////////////////////////////////////////////////////////////////
+// Cmd
 
 // Cmd represents a command.
 // All configuration of env vars and args for this command should be done via
 // the Shell.
 // Not thread-safe.
 type Cmd struct {
-	c             *exec.Cmd
-	sh            *Shell
-	calledStart   bool
-	stdoutWriters []io.Writer
-	stderrWriters []io.Writer
-	condReady     *sync.Cond
-	ready         bool // protected by condReady.L
-	condVars      *sync.Cond
-	vars          map[string]string // protected by condVars.L
+	c              *exec.Cmd
+	sh             *Shell
+	calledStart    bool
+	calledWait     bool
+	stdoutWriters  []io.Writer
+	stderrWriters  []io.Writer
+	closeAfterWait []io.Closer
+	condReady      *sync.Cond
+	ready          bool // protected by condReady.L
+	condVars       *sync.Cond
+	vars           map[string]string // protected by condVars.L
 }
 
-// Stdout returns a buffer-backed Reader for this command's stdout. Must be
-// called before Start. May be called more than once; each invocation creates a
-// new buffer.
+// Stdout returns a Reader backed by a buffered pipe for this command's stdout.
+// Must be called before Start. May be called more than once; each invocation
+// creates a new pipe.
 func (c *Cmd) Stdout() io.Reader {
 	c.sh.ok()
 	res, err := c.stdout()
@@ -65,9 +69,9 @@ func (c *Cmd) Stdout() io.Reader {
 	return res
 }
 
-// Stderr returns a buffer-backed Reader for this command's stderr. Must be
-// called before Start. May be called more than once; each invocation creates a
-// new buffer.
+// Stderr returns a Reader backed by a buffered pipe for this command's stderr.
+// Must be called before Start. May be called more than once; each invocation
+// creates a new pipe.
 func (c *Cmd) Stderr() io.Reader {
 	c.sh.ok()
 	res, err := c.stderr()
@@ -149,11 +153,14 @@ func newCmd(sh *Shell, name string, args ...string) *Cmd {
 	}
 }
 
-func (c *Cmd) addWriter(writers *[]io.Writer, w io.Writer) {
-	*writers = append(*writers, w)
-	if f, ok := w.(*os.File); ok {
-		c.c.ExtraFiles = append(c.c.ExtraFiles, f)
+func closeAll(closers []io.Closer) {
+	for _, c := range closers {
+		c.Close()
 	}
+}
+
+func addWriter(writers *[]io.Writer, w io.Writer) {
+	*writers = append(*writers, w)
 }
 
 // recvWriter listens for gosh messages from a child process.
@@ -212,7 +219,7 @@ func (c *Cmd) initMultiWriter(f *os.File, t string) (io.Writer, error) {
 		writers = &c.stderrWriters
 	}
 	if !c.sh.opts.SuppressChildOutput {
-		c.addWriter(writers, f)
+		addWriter(writers, f)
 	}
 	if c.sh.opts.ChildOutputDir != "" {
 		suffix := "stderr"
@@ -224,36 +231,39 @@ func (c *Cmd) initMultiWriter(f *os.File, t string) (io.Writer, error) {
 		if err != nil {
 			return nil, err
 		}
-		c.addWriter(writers, f)
+		addWriter(writers, f)
+		c.closeAfterWait = append(c.closeAfterWait, f)
 	}
 	if f == os.Stdout {
-		c.addWriter(writers, &recvWriter{c: c})
+		addWriter(writers, &recvWriter{c: c})
 	}
 	return io.MultiWriter(*writers...), nil
 }
 
 func (c *Cmd) stdout() (io.Reader, error) {
 	if c.calledStart {
-		return nil, alreadyCalledStart
+		return nil, errAlreadyCalledStart
 	}
-	var buf bytes.Buffer
-	c.addWriter(&c.stdoutWriters, &buf)
-	return &buf, nil
+	p := newPipe()
+	addWriter(&c.stdoutWriters, p)
+	c.closeAfterWait = append(c.closeAfterWait, p)
+	return p, nil
 }
 
 func (c *Cmd) stderr() (io.Reader, error) {
 	if c.calledStart {
-		return nil, alreadyCalledStart
+		return nil, errAlreadyCalledStart
 	}
-	var buf bytes.Buffer
-	c.addWriter(&c.stderrWriters, &buf)
-	return &buf, nil
+	p := newPipe()
+	addWriter(&c.stderrWriters, p)
+	c.closeAfterWait = append(c.closeAfterWait, p)
+	return p, nil
 }
 
 // TODO: Make errors bubble up to Await*() in addition to Wait().
 func (c *Cmd) start() error {
 	if c.calledStart {
-		return alreadyCalledStart
+		return errAlreadyCalledStart
 	}
 	c.calledStart = true
 	if c.c.Stdout != nil || c.c.Stderr != nil { // invariant check
@@ -270,7 +280,11 @@ func (c *Cmd) start() error {
 	}
 	// TODO: Wrap every child process with a "supervisor" process that calls
 	// WatchParent().
-	return c.c.Start()
+	err = c.c.Start()
+	if err != nil {
+		closeAll(c.closeAfterWait)
+	}
+	return err
 }
 
 func (c *Cmd) awaitReady() error {
@@ -308,7 +322,12 @@ func (c *Cmd) awaitVars(keys ...string) (map[string]string, error) {
 }
 
 func (c *Cmd) wait() error {
-	return c.c.Wait()
+	if c.calledWait {
+		return errAlreadyCalledWait
+	}
+	err := c.c.Wait()
+	closeAll(c.closeAfterWait)
+	return err
 }
 
 func (c *Cmd) run() error {
@@ -320,15 +339,15 @@ func (c *Cmd) run() error {
 
 func (c *Cmd) output() ([]byte, error) {
 	var buf bytes.Buffer
-	c.addWriter(&c.stdoutWriters, &buf)
+	addWriter(&c.stdoutWriters, &buf)
 	err := c.run()
 	return buf.Bytes(), err
 }
 
 func (c *Cmd) combinedOutput() ([]byte, error) {
 	var buf bytes.Buffer
-	c.addWriter(&c.stdoutWriters, &buf)
-	c.addWriter(&c.stderrWriters, &buf)
+	addWriter(&c.stdoutWriters, &buf)
+	addWriter(&c.stderrWriters, &buf)
 	err := c.run()
 	return buf.Bytes(), err
 }
@@ -352,7 +371,7 @@ type Shell struct {
 	tempDirs      []string
 	dirStack      []string // for pushd/popd
 	cleanupFns    []func()
-	cleanupLock   sync.Mutex // protects calledCleanup
+	cleanupMu     sync.Mutex // protects calledCleanup
 	calledCleanup bool
 }
 
@@ -512,12 +531,12 @@ func (sh *Shell) Popd() {
 // Cleanup cleans up all resources (child processes, temporary files and
 // directories) associated with this Shell.
 func (sh *Shell) Cleanup() {
-	sh.cleanupLock.Lock()
+	sh.cleanupMu.Lock()
 	if sh.calledCleanup {
-		panic(alreadyCalledCleanup)
+		panic(errAlreadyCalledCleanup)
 	}
 	sh.calledCleanup = true
-	sh.cleanupLock.Unlock()
+	sh.cleanupMu.Unlock()
 	sh.cleanup()
 }
 
@@ -564,13 +583,13 @@ func newShell(opts ShellOpts) (*Shell, error) {
 	// Call sh.cleanup() if needed when a termination signal is received.
 	OnTerminationSignal(func(sig os.Signal) {
 		sh.log(false, fmt.Sprintf("Received signal: %v", sig))
-		sh.cleanupLock.Lock()
+		sh.cleanupMu.Lock()
 		if !sh.calledCleanup {
 			sh.calledCleanup = true
-			sh.cleanupLock.Unlock()
+			sh.cleanupMu.Unlock()
 			sh.cleanup()
 		} else {
-			sh.cleanupLock.Unlock()
+			sh.cleanupMu.Unlock()
 		}
 		// http://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
 		// Unfortunately, os.Signal does not surface the signal number.
@@ -596,11 +615,11 @@ func (sh *Shell) ok() {
 	if sh.err != nil {
 		panic(sh.err)
 	}
-	sh.cleanupLock.Lock()
+	sh.cleanupMu.Lock()
 	if sh.calledCleanup {
-		panic(alreadyCalledCleanup)
+		panic(errAlreadyCalledCleanup)
 	}
-	sh.cleanupLock.Unlock()
+	sh.cleanupMu.Unlock()
 }
 
 func (sh *Shell) cmd(env []string, name string, args ...string) *Cmd {
@@ -650,6 +669,9 @@ func (sh *Shell) appendArgs(args ...string) {
 func (sh *Shell) wait() error {
 	var res error
 	for _, c := range sh.cmds {
+		if c.calledWait {
+			continue
+		}
 		if err := c.wait(); err != nil {
 			sh.log(true, fmt.Sprintf("Cmd.Wait() failed: %v", err))
 			if res == nil {
