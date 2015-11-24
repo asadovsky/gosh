@@ -58,8 +58,8 @@ type Cmd struct {
 	vars           map[string]string // protected by condVars.L
 }
 
-// TODO: Add WithOpts method that returns a new command with the specified
-// options (overriding ShellOpts).
+// TODO: Add WithOpts method that returns a new Cmd with the specified options
+// (overriding ShellOpts).
 
 // Stdout returns a Reader backed by a buffered pipe for this command's stdout.
 // Must be called before Start. May be called more than once; each invocation
