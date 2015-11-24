@@ -29,9 +29,10 @@ const (
 )
 
 var (
-	errAlreadyCalledCleanup = errors.New("already called cleanup")
-	errAlreadyCalledStart   = errors.New("already called start")
-	errAlreadyCalledWait    = errors.New("already called wait")
+	errAlreadyCalledCleanup  = errors.New("already called cleanup")
+	errAlreadyCalledStart    = errors.New("already called start")
+	errAlreadyCalledWait     = errors.New("already called wait")
+	errNeedMaybeRunFnAndExit = errors.New("did not call MaybeRunFnAndExit")
 )
 
 // TODO: Add timeout to AwaitReady, AwaitVars, Wait, Run, etc.
@@ -268,7 +269,7 @@ func (c *Cmd) start() error {
 		log.Fatal(c.c.Stdout, c.c.Stderr)
 	}
 	// Set up stdout and stderr.
-	t := time.Now().UTC().Format("20060102.150405.999")
+	t := time.Now().UTC().Format("20060102.150405.000000")
 	var err error
 	if c.c.Stdout, err = c.initMultiWriter(os.Stdout, t); err != nil {
 		return err
@@ -447,6 +448,17 @@ func (sh *Shell) Cmd(env []string, name string, args ...string) *Cmd {
 func (sh *Shell) Fn(env []string, fn *Fn, args ...interface{}) *Cmd {
 	sh.ok()
 	res, err := sh.fn(env, fn, args...)
+	sh.SetErr(err)
+	return res
+}
+
+// Main returns a Cmd for an invocation of the given registered main() function.
+// Intended usage: Have your program's main() call RealMain, then write a
+// meta-program that uses Shell.Main to run RealMain in a child process. With
+// this approach, RealMain can be compiled into the meta-program's binary.
+func (sh *Shell) Main(env []string, fn *Fn, args ...string) *Cmd {
+	sh.ok()
+	res, err := sh.main(env, fn, args...)
 	sh.SetErr(err)
 	return res
 }
@@ -643,10 +655,10 @@ func (sh *Shell) cmd(env []string, name string, args ...string) *Cmd {
 }
 
 func (sh *Shell) fn(env []string, fn *Fn, args ...interface{}) (*Cmd, error) {
-	// Safeguard against the developer forgetting to call RunFnAndExitIfChild,
-	// which would otherwise lead to recursive invocation of this program.
-	if !calledRunFnAndExitIfChild {
-		return nil, errors.New("did not call RunFnAndExitIfChild")
+	// Safeguard against the developer forgetting to call MaybeRunFnAndExit, which
+	// could lead to infinite recursion.
+	if !calledMaybeRunFnAndExit {
+		return nil, errNeedMaybeRunFnAndExit
 	}
 	b, err := encInvocation(fn.name, args...)
 	if err != nil {
@@ -654,6 +666,25 @@ func (sh *Shell) fn(env []string, fn *Fn, args ...interface{}) (*Cmd, error) {
 	}
 	env = mapToSlice(mergeMaps(sliceToMap(env), map[string]string{envInvocation: string(b)}))
 	return sh.cmd(env, os.Args[0]), nil
+}
+
+func (sh *Shell) main(env []string, fn *Fn, args ...string) (*Cmd, error) {
+	// Safeguard against the developer forgetting to call MaybeRunFnAndExit, which
+	// could lead to infinite recursion.
+	if !calledMaybeRunFnAndExit {
+		return nil, errNeedMaybeRunFnAndExit
+	}
+	// Check that fn has the required signature.
+	t := fn.value.Type()
+	if t.NumIn() != 0 || t.NumOut() != 0 {
+		return nil, errors.New("main function must have no input or output parameters")
+	}
+	b, err := encInvocation(fn.name)
+	if err != nil {
+		return nil, err
+	}
+	env = mapToSlice(mergeMaps(sliceToMap(env), map[string]string{envInvocation: string(b)}))
+	return sh.cmd(env, os.Args[0], args...), nil
 }
 
 func (sh *Shell) get(key string) string {
@@ -847,14 +878,14 @@ func (sh *Shell) cleanup() {
 ////////////////////////////////////////////////////////////////////////////////
 // Public utilities
 
-var calledRunFnAndExitIfChild = false
+var calledMaybeRunFnAndExit = false
 
-// RunFnAndExitIfChild must be called first thing in main() or TestMain(),
-// before flags are parsed. In the parent process, it returns immediately with
-// no effect. In a child process for a Shell.Fn() command, it runs the specified
-// function, then exits.
-func RunFnAndExitIfChild() {
-	calledRunFnAndExitIfChild = true
+// MaybeRunFnAndExit must be called first thing in main() or TestMain(), before
+// flags are parsed. In the parent process, it returns immediately with no
+// effect. In a child process for a Shell.Fn() or Shell.Main() command, it runs
+// the specified function, then exits.
+func MaybeRunFnAndExit() {
+	calledMaybeRunFnAndExit = true
 	s := os.Getenv(envInvocation)
 	if s == "" {
 		return
@@ -871,10 +902,10 @@ func RunFnAndExitIfChild() {
 	}
 }
 
-// Run calls RunFnAndExitIfChild(), then returns m.Run(). Exported so that
+// Run calls MaybeRunFnAndExit(), then returns m.Run(). Exported so that
 // TestMain functions can simply call os.Exit(gosh.Run(m)).
 func Run(m *testing.M) int {
-	RunFnAndExitIfChild()
+	MaybeRunFnAndExit()
 	return m.Run()
 }
 

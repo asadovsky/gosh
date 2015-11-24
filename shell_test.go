@@ -167,6 +167,13 @@ func TestFns(t *testing.T) {
 	eq(t, output, "Hello, world!\n")
 }
 
+func TestShellMain(t *testing.T) {
+	sh := gosh.NewShell(gosh.ShellOpts{T: t})
+	defer sh.Cleanup()
+	output := string(sh.Main(nil, lib.HelloWorldMain).Output())
+	eq(t, output, "Hello, world!\n")
+}
+
 var write = gosh.Register("write", func(s string, stdout bool) error {
 	var f *os.File
 	if stdout {

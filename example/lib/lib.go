@@ -11,6 +11,13 @@ import (
 	"github.com/asadovsky/gosh"
 )
 
+const helloWorld = "Hello, world!"
+
+// HelloWorldMain is used to demonstrate usage of Shell.Main.
+var HelloWorldMain = gosh.Register("HelloWorldMain", func() {
+	fmt.Println(helloWorld)
+})
+
 func Get(addr string) {
 	resp, err := http.Get("http://" + addr)
 	if err != nil {
@@ -38,7 +45,7 @@ func (ln tcpKeepAliveListener) Accept() (c net.Conn, err error) {
 
 func Serve() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "Hello, world!")
+		fmt.Fprintln(w, helloWorld)
 	})
 	// Note: With http.ListenAndServe() there's no easy way to tell which port
 	// number we were assigned, so instead we use net.Listen() followed by

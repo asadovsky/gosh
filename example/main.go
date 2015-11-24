@@ -48,8 +48,16 @@ func ExampleFns() {
 	fmt.Print(output)
 }
 
+func ExampleShellMain() {
+	sh := gosh.NewShell(gosh.ShellOpts{})
+	defer sh.Cleanup()
+	output := string(sh.Main(nil, lib.HelloWorldMain).Output())
+	fmt.Print(output)
+}
+
 func main() {
-	gosh.RunFnAndExitIfChild()
+	gosh.MaybeRunFnAndExit()
 	ExampleCmds()
 	ExampleFns()
+	ExampleShellMain()
 }
