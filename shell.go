@@ -85,22 +85,21 @@ func (c *Cmd) Stderr() io.Reader {
 	return res
 }
 
-// Start starts this command. May produce an error.
+// Start starts this command.
 func (c *Cmd) Start() {
 	c.sh.ok()
 	c.sh.SetErr(c.start())
 }
 
 // AwaitReady waits for the child process to call SendReady. Must not be called
-// before Start or after Wait. May produce an error.
+// before Start or after Wait.
 func (c *Cmd) AwaitReady() {
 	c.sh.ok()
 	c.sh.SetErr(c.awaitReady())
 }
 
 // AwaitVars waits for the child process to send values for the given vars
-// (using SendVars). Must not be called before Start or after Wait. May produce
-// an error.
+// (using SendVars). Must not be called before Start or after Wait.
 func (c *Cmd) AwaitVars(keys ...string) map[string]string {
 	c.sh.ok()
 	res, err := c.awaitVars(keys...)
@@ -108,17 +107,16 @@ func (c *Cmd) AwaitVars(keys ...string) map[string]string {
 	return res
 }
 
-// Wait waits for this command to exit. May produce an error.
+// Wait waits for this command to exit.
 func (c *Cmd) Wait() {
 	c.sh.ok()
 	c.sh.SetErr(c.wait())
 }
 
 // Shutdown sends the given signal to this command, then waits for it to exit.
-// May produce an error.
 func (c *Cmd) Shutdown(signal syscall.Signal) {
 	c.sh.ok()
-	if err := c.Process().Signal(signal); err != nil {
+	if err := c.process().Signal(signal); err != nil {
 		c.sh.SetErr(err)
 		return
 	}
@@ -131,14 +129,13 @@ func (c *Cmd) Shutdown(signal syscall.Signal) {
 	}
 }
 
-// Run calls Start followed by Wait. May produce an error.
+// Run calls Start followed by Wait.
 func (c *Cmd) Run() {
 	c.sh.ok()
 	c.sh.SetErr(c.run())
 }
 
-// Output calls Start followed by Wait, then returns this command's stdout. May
-// produce an error.
+// Output calls Start followed by Wait, then returns this command's stdout.
 func (c *Cmd) Output() []byte {
 	c.sh.ok()
 	res, err := c.output()
@@ -147,7 +144,7 @@ func (c *Cmd) Output() []byte {
 }
 
 // CombinedOutput calls Start followed by Wait, then returns this command's
-// combined stdout and stderr. May produce an error.
+// combined stdout and stderr.
 func (c *Cmd) CombinedOutput() []byte {
 	c.sh.ok()
 	res, err := c.combinedOutput()
@@ -403,9 +400,8 @@ type ShellOpts struct {
 	// If not nil, errors trigger T.Fatal instead of panic.
 	T *testing.T
 	// If true, errors are logged but are not fatal. Errors can be accessed via
-	// Shell.Err(). Comments specify which Shell and Cmd methods may produce
-	// errors. All methods except Shell.{Err,SetErr,ClearErr,Cleanup} panic if
-	// Shell.Err() is not nil.
+	// Shell.Err(). All methods except Shell.{Err,SetErr,ClearErr,Cleanup} panic
+	// if Shell.Err() is not nil.
 	NoDieOnErr bool
 	// By default, child stdout and stderr are propagated up to the parent's
 	// stdout and stderr. If SuppressChildOutput is true, child stdout and stderr
@@ -421,7 +417,7 @@ type ShellOpts struct {
 	BinDir string
 }
 
-// NewShell returns a new Shell. May produce an error.
+// NewShell returns a new Shell.
 func NewShell(opts ShellOpts) *Shell {
 	sh, err := newShell(opts)
 	sh.SetErr(err)
@@ -525,8 +521,7 @@ func (sh *Shell) AppendArgs(args ...string) {
 	sh.appendArgs(args...)
 }
 
-// Wait waits for all commands started by this Shell to exit. Produces an error
-// if any individual command's Wait failed.
+// Wait waits for all commands started by this Shell to exit.
 func (sh *Shell) Wait() {
 	sh.ok()
 	sh.SetErr(sh.wait())
@@ -534,8 +529,8 @@ func (sh *Shell) Wait() {
 
 // BuildGoPkg compiles a Go package using the "go build" command and writes the
 // resulting binary to ShellOpts.BinDir. Returns the absolute path to the
-// binary. May produce an error. Included in Shell for convenience, but could
-// have just as easily been provided as a utility function.
+// binary. Included in Shell for convenience, but could have just as easily been
+// provided as a utility function.
 func (sh *Shell) BuildGoPkg(pkg string, flags ...string) string {
 	sh.ok()
 	res, err := sh.buildGoPkg(pkg, flags...)
@@ -544,8 +539,7 @@ func (sh *Shell) BuildGoPkg(pkg string, flags ...string) string {
 }
 
 // MakeTempFile creates a new temporary file in os.TempDir, opens the file for
-// reading and writing, and returns the resulting *os.File. May produce an
-// error.
+// reading and writing, and returns the resulting *os.File.
 func (sh *Shell) MakeTempFile() *os.File {
 	sh.ok()
 	res, err := sh.makeTempFile()
@@ -554,7 +548,7 @@ func (sh *Shell) MakeTempFile() *os.File {
 }
 
 // MakeTempDir creates a new temporary directory in os.TempDir and returns the
-// path of the new directory. May produce an error.
+// path of the new directory.
 func (sh *Shell) MakeTempDir() string {
 	sh.ok()
 	res, err := sh.makeTempDir()
@@ -562,13 +556,13 @@ func (sh *Shell) MakeTempDir() string {
 	return res
 }
 
-// Pushd behaves like Bash pushd. May produce an error.
+// Pushd behaves like Bash pushd.
 func (sh *Shell) Pushd(dir string) {
 	sh.ok()
 	sh.SetErr(sh.pushd(dir))
 }
 
-// Popd behaves like Bash popd. May produce an error.
+// Popd behaves like Bash popd.
 func (sh *Shell) Popd() {
 	sh.ok()
 	sh.SetErr(sh.popd())

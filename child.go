@@ -1,8 +1,6 @@
 package gosh
 
-// This file contains functions designed to be called from a child process, e.g.
-// for sending messages to the parent process. Currently, all messages are sent
-// over stdout.
+// This file contains functions meant to be called from a child process.
 
 import (
 	"encoding/json"
