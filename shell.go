@@ -35,7 +35,7 @@ var (
 	errNeedMaybeRunFnAndExit = errors.New("did not call MaybeRunFnAndExit")
 )
 
-// TODO: Add timeout to AwaitReady, AwaitVars, Wait, Run, etc.
+// TODO: Add timeout to Cmd.{AwaitReady,AwaitVars,Wait,Run}, Shell.Wait, etc.
 
 ////////////////////////////////////////////////////////////////////////////////
 // Cmd
@@ -58,8 +58,11 @@ type Cmd struct {
 	vars           map[string]string // protected by condVars.L
 }
 
-// TODO: Add WithOpts method that returns a new Cmd with the specified options
-// (overriding ShellOpts).
+// TODO:
+// - Add WithOpts method that returns a new Cmd with the specified options
+//   (overriding ShellOpts).
+// - Maybe add a method to send SIGTERM, wait a bit, then send SIGKILL if the
+//   process hasn't exited.
 
 // Stdout returns a Reader backed by a buffered pipe for this command's stdout.
 // Must be called before Start. May be called more than once; each invocation
@@ -108,6 +111,20 @@ func (c *Cmd) AwaitVars(keys ...string) map[string]string {
 func (c *Cmd) Wait() {
 	c.sh.ok()
 	c.sh.SetErr(c.wait())
+}
+
+// Shutdown sends the given signal to this command, then waits for it to exit.
+// May produce an error.
+func (c *Cmd) Shutdown(signal syscall.Signal) {
+	c.sh.ok()
+	if err := c.Process().Signal(signal); err != nil {
+		c.sh.SetErr(err)
+		return
+	}
+	err := c.wait()
+	if _, ok := err.(*exec.ExitError); !ok || c.c.ProcessState.Sys().(syscall.WaitStatus).Signal() != signal {
+		c.sh.SetErr(err)
+	}
 }
 
 // Run calls Start followed by Wait. May produce an error.

@@ -46,10 +46,10 @@ var errWriteOnClosedPipe = errors.New("write on closed pipe")
 func (p *pipe) Write(d []byte) (n int, err error) {
 	p.cond.L.Lock()
 	defer p.cond.L.Unlock()
-	defer p.cond.Signal()
 	if p.err != nil {
 		return 0, errWriteOnClosedPipe
 	}
+	defer p.cond.Signal()
 	return p.buf.Write(d)
 }
 
@@ -57,8 +57,8 @@ func (p *pipe) Write(d []byte) (n int, err error) {
 func (p *pipe) Close() error {
 	p.cond.L.Lock()
 	defer p.cond.L.Unlock()
-	defer p.cond.Signal()
 	if p.err == nil {
+		defer p.cond.Signal()
 		p.err = io.EOF
 	}
 	return nil
