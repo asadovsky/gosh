@@ -879,9 +879,6 @@ func (sh *Shell) cleanup() {
 				sh.warningf("%d.Kill() failed: %v", c.process().Pid, err)
 			}
 		})
-		sh.forEachRunningCmd(func(c *Cmd) {
-			sh.warningf("%s (PID %d) did not die", c.c.Path, c.process().Pid)
-		})
 	}
 	// Close and delete all temporary files.
 	for _, tempFile := range sh.tempFiles {
