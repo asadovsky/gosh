@@ -11,7 +11,6 @@ var addr = flag.String("addr", "localhost:8080", "server addr")
 
 func main() {
 	gosh.WatchParent()
-	gosh.ExitOnTerminationSignal()
 	flag.Parse()
 	lib.Get(*addr)
 }

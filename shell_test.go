@@ -6,17 +6,20 @@ package gosh_test
 // - Cmd.{Wait,Run,CombinedOutput}
 // - Shell.{AppendArgs,Wait,MakeTempFile,MakeTempDir}
 // - ShellOpts (including defaulting behavior)
-// - WatchParent, OnTerminationSignal
+// - WatchParent
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/asadovsky/gosh"
 	"github.com/asadovsky/gosh/example/lib"
@@ -211,6 +214,25 @@ func TestStdoutStderr(t *testing.T) {
 	eq(t, output, s)
 	eq(t, toString(stdout), "")
 	eq(t, toString(stderr), s)
+}
+
+var sleep = gosh.Register("sleep", func(d time.Duration) {
+	time.Sleep(d)
+})
+
+func TestShutdown(t *testing.T) {
+	sh := gosh.NewShell(gosh.ShellOpts{T: t})
+	defer sh.Cleanup()
+
+	for _, d := range []time.Duration{0, time.Second} {
+		for _, s := range []syscall.Signal{syscall.SIGINT, syscall.SIGKILL} {
+			fmt.Println(d, s)
+			c := sh.Fn(nil, sleep, d)
+			c.Start()
+			time.Sleep(10 * time.Millisecond)
+			c.Shutdown(s)
+		}
+	}
 }
 
 func TestMain(m *testing.M) {

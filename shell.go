@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"runtime/debug"
@@ -61,7 +62,7 @@ type Cmd struct {
 // TODO:
 // - Add WithOpts method that returns a new Cmd with the specified options
 //   (overriding ShellOpts).
-// - Maybe add a method to send SIGTERM, wait a bit, then send SIGKILL if the
+// - Maybe add a method to send SIGINT, wait a bit, then send SIGKILL if the
 //   process hasn't exited.
 
 // Stdout returns a Reader backed by a buffered pipe for this command's stdout.
@@ -122,7 +123,10 @@ func (c *Cmd) Shutdown(signal syscall.Signal) {
 		return
 	}
 	err := c.wait()
-	if _, ok := err.(*exec.ExitError); !ok || c.c.ProcessState.Sys().(syscall.WaitStatus).Signal() != signal {
+	if err == nil {
+		return
+	}
+	if _, ok := err.(*exec.ExitError); !ok {
 		c.sh.SetErr(err)
 	}
 }
@@ -591,6 +595,16 @@ func (sh *Shell) AddToCleanup(fn func()) {
 ////////////////////////////////////////
 // Shell internals
 
+// onTerminationSignal starts a goroutine that listens for various termination
+// signals and calls the given function when such a signal is received.
+func onTerminationSignal(fn func(os.Signal)) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	go func() {
+		fn(<-ch)
+	}()
+}
+
 func newShell(opts ShellOpts) (*Shell, error) {
 	// Set this process's PGID to its PID so that its child processes can be
 	// identified reliably.
@@ -623,8 +637,8 @@ func newShell(opts ShellOpts) (*Shell, error) {
 		}
 	}
 	// Call sh.cleanup() if needed when a termination signal is received.
-	OnTerminationSignal(func(sig os.Signal) {
-		sh.warningf("Received signal: %v", sig)
+	onTerminationSignal(func(signal os.Signal) {
+		sh.warningf("Received signal: %v", signal)
 		sh.cleanupMu.Lock()
 		if !sh.calledCleanup {
 			sh.calledCleanup = true
@@ -633,9 +647,11 @@ func newShell(opts ShellOpts) (*Shell, error) {
 		} else {
 			sh.cleanupMu.Unlock()
 		}
-		// http://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
-		// Unfortunately, os.Signal does not surface the signal number.
-		os.Exit(1)
+		if s, ok := signal.(syscall.Signal); !ok {
+			os.Exit(1)
+		} else {
+			os.Exit(int(s))
+		}
 	})
 	return sh, nil
 }
@@ -844,12 +860,12 @@ func (sh *Shell) cleanup() {
 	if os.Getpid() != syscall.Getpgrp() {
 		panic(fmt.Sprint(os.Getpid(), syscall.Getpgrp()))
 	}
-	// Terminate all children that are still running. Try SIGTERM first; if that
+	// Terminate all children that are still running. Try SIGINT first; if that
 	// doesn't work, use SIGKILL.
 	// https://golang.org/pkg/os/#Process.Signal
 	anyRunning := sh.forEachRunningCmd(func(c *Cmd) {
-		if err := c.process().Signal(syscall.SIGTERM); err != nil {
-			sh.warningf("%d.Signal(SIGTERM) failed: %v", c.process().Pid, err)
+		if err := c.process().Signal(syscall.SIGINT); err != nil {
+			sh.warningf("%d.Signal(SIGINT) failed: %v", c.process().Pid, err)
 		}
 	})
 	// If any child is still running, wait for 50ms.
@@ -911,7 +927,6 @@ func MaybeRunFnAndExit() {
 		return
 	}
 	WatchParent()
-	ExitOnTerminationSignal()
 	if name, args, err := decInvocation(s); err != nil {
 		log.Fatal(err)
 	} else {

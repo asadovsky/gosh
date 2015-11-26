@@ -7,6 +7,5 @@ import (
 
 func main() {
 	gosh.WatchParent()
-	gosh.ExitOnTerminationSignal()
 	lib.Serve()
 }
