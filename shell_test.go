@@ -9,9 +9,9 @@ package gosh_test
 // - WatchParent
 
 import (
-	"bytes"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -144,8 +144,8 @@ func TestCmds(t *testing.T) {
 	// Run client.
 	binPath = sh.BuildGoPkg("github.com/asadovsky/gosh/example/client")
 	c = sh.Cmd(nil, binPath, "-addr="+addr)
-	output := string(c.Output())
-	eq(t, output, "Hello, world!\n")
+	stdout, _ := c.Output()
+	eq(t, string(stdout), "Hello, world!\n")
 }
 
 var (
@@ -166,15 +166,15 @@ func TestFns(t *testing.T) {
 
 	// Run client.
 	c = sh.Fn(nil, get, addr)
-	output := string(c.Output())
-	eq(t, output, "Hello, world!\n")
+	stdout, _ := c.Output()
+	eq(t, string(stdout), "Hello, world!\n")
 }
 
 func TestShellMain(t *testing.T) {
 	sh := gosh.NewShell(gosh.ShellOpts{T: t})
 	defer sh.Cleanup()
-	output := string(sh.Main(nil, lib.HelloWorldMain).Output())
-	eq(t, output, "Hello, world!\n")
+	stdout, _ := sh.Main(nil, lib.HelloWorldMain).Output()
+	eq(t, string(stdout), "Hello, world!\n")
 }
 
 var write = gosh.Register("write", func(s string, stdout bool) error {
@@ -189,9 +189,11 @@ var write = gosh.Register("write", func(s string, stdout bool) error {
 })
 
 func toString(r io.Reader) string {
-	buf := new(bytes.Buffer)
-	buf.ReadFrom(r)
-	return buf.String()
+	if b, err := ioutil.ReadAll(r); err != nil {
+		panic(err)
+	} else {
+		return string(b)
+	}
 }
 
 func TestStdoutStderr(t *testing.T) {

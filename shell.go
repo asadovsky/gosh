@@ -135,12 +135,13 @@ func (c *Cmd) Run() {
 	c.sh.SetErr(c.run())
 }
 
-// Output calls Start followed by Wait, then returns this command's stdout.
-func (c *Cmd) Output() []byte {
+// Output calls Start followed by Wait, then returns this command's stdout and
+// stderr.
+func (c *Cmd) Output() ([]byte, []byte) {
 	c.sh.ok()
-	res, err := c.output()
+	stdout, stderr, err := c.output()
 	c.sh.SetErr(err)
-	return res
+	return stdout, stderr
 }
 
 // CombinedOutput calls Start followed by Wait, then returns this command's
@@ -357,11 +358,12 @@ func (c *Cmd) run() error {
 	return c.wait()
 }
 
-func (c *Cmd) output() ([]byte, error) {
-	var buf bytes.Buffer
-	addWriter(&c.stdoutWriters, &buf)
+func (c *Cmd) output() ([]byte, []byte, error) {
+	var stdout, stderr bytes.Buffer
+	addWriter(&c.stdoutWriters, &stdout)
+	addWriter(&c.stderrWriters, &stderr)
 	err := c.run()
-	return buf.Bytes(), err
+	return stdout.Bytes(), stderr.Bytes(), err
 }
 
 func (c *Cmd) combinedOutput() ([]byte, error) {

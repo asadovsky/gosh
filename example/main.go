@@ -22,8 +22,8 @@ func ExampleCmds() {
 	// Run client.
 	binPath = sh.BuildGoPkg("github.com/asadovsky/gosh/example/client")
 	c = sh.Cmd(nil, binPath, "-addr="+addr)
-	output := string(c.Output())
-	fmt.Print(output)
+	stdout, _ := c.Output()
+	fmt.Print(string(stdout))
 }
 
 var (
@@ -44,15 +44,15 @@ func ExampleFns() {
 
 	// Run client.
 	c = sh.Fn(nil, get, addr)
-	output := string(c.Output())
-	fmt.Print(output)
+	stdout, _ := c.Output()
+	fmt.Print(string(stdout))
 }
 
 func ExampleShellMain() {
 	sh := gosh.NewShell(gosh.ShellOpts{})
 	defer sh.Cleanup()
-	output := string(sh.Main(nil, lib.HelloWorldMain).Output())
-	fmt.Print(output)
+	stdout, _ := sh.Main(nil, lib.HelloWorldMain).Output()
+	fmt.Print(string(stdout))
 }
 
 func main() {
