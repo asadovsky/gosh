@@ -135,7 +135,7 @@ func TestCmds(t *testing.T) {
 
 	// Start server.
 	binPath := sh.BuildGoPkg("github.com/asadovsky/gosh/example/server")
-	c := sh.Cmd(nil, binPath)
+	c := sh.Cmd(binPath)
 	c.Start()
 	c.AwaitReady()
 	addr := c.AwaitVars("Addr")["Addr"]
@@ -143,7 +143,7 @@ func TestCmds(t *testing.T) {
 
 	// Run client.
 	binPath = sh.BuildGoPkg("github.com/asadovsky/gosh/example/client")
-	c = sh.Cmd(nil, binPath, "-addr="+addr)
+	c = sh.Cmd(binPath, "-addr="+addr)
 	stdout, _ := c.Output()
 	eq(t, string(stdout), "Hello, world!\n")
 }
@@ -158,14 +158,14 @@ func TestFns(t *testing.T) {
 	defer sh.Cleanup()
 
 	// Start server.
-	c := sh.Fn(nil, serve)
+	c := sh.Fn(serve)
 	c.Start()
 	c.AwaitReady()
 	addr := c.AwaitVars("Addr")["Addr"]
 	neq(t, addr, "")
 
 	// Run client.
-	c = sh.Fn(nil, get, addr)
+	c = sh.Fn(get, addr)
 	stdout, _ := c.Output()
 	eq(t, string(stdout), "Hello, world!\n")
 }
@@ -173,7 +173,7 @@ func TestFns(t *testing.T) {
 func TestShellMain(t *testing.T) {
 	sh := gosh.NewShell(gosh.ShellOpts{T: t})
 	defer sh.Cleanup()
-	stdout, _ := sh.Main(nil, lib.HelloWorldMain).Output()
+	stdout, _ := sh.Main(lib.HelloWorldMain).Output()
 	eq(t, string(stdout), "Hello, world!\n")
 }
 
@@ -202,7 +202,7 @@ func TestStdoutStderr(t *testing.T) {
 	s := "TestStdoutStderr\n"
 
 	// Write to stdout.
-	c := sh.Fn(nil, write, s, true)
+	c := sh.Fn(write, s, true)
 	stdout, stderr := c.Stdout(), c.Stderr()
 	output := string(c.CombinedOutput())
 	eq(t, output, s)
@@ -210,7 +210,7 @@ func TestStdoutStderr(t *testing.T) {
 	eq(t, toString(stderr), "")
 
 	// Write to stderr.
-	c = sh.Fn(nil, write, s, false)
+	c = sh.Fn(write, s, false)
 	stdout, stderr = c.Stdout(), c.Stderr()
 	output = string(c.CombinedOutput())
 	eq(t, output, s)
@@ -229,7 +229,7 @@ func TestShutdown(t *testing.T) {
 	for _, d := range []time.Duration{0, time.Second} {
 		for _, s := range []syscall.Signal{syscall.SIGINT, syscall.SIGKILL} {
 			fmt.Println(d, s)
-			c := sh.Fn(nil, sleep, d)
+			c := sh.Fn(sleep, d)
 			c.Start()
 			time.Sleep(10 * time.Millisecond)
 			c.Shutdown(s)

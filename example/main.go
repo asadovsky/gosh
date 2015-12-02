@@ -13,7 +13,7 @@ func ExampleCmds() {
 
 	// Start server.
 	binPath := sh.BuildGoPkg("github.com/asadovsky/gosh/example/server")
-	c := sh.Cmd(nil, binPath)
+	c := sh.Cmd(binPath)
 	c.Start()
 	c.AwaitReady()
 	addr := c.AwaitVars("Addr")["Addr"]
@@ -21,7 +21,7 @@ func ExampleCmds() {
 
 	// Run client.
 	binPath = sh.BuildGoPkg("github.com/asadovsky/gosh/example/client")
-	c = sh.Cmd(nil, binPath, "-addr="+addr)
+	c = sh.Cmd(binPath, "-addr="+addr)
 	stdout, _ := c.Output()
 	fmt.Print(string(stdout))
 }
@@ -36,14 +36,14 @@ func ExampleFns() {
 	defer sh.Cleanup()
 
 	// Start server.
-	c := sh.Fn(nil, serve)
+	c := sh.Fn(serve)
 	c.Start()
 	c.AwaitReady()
 	addr := c.AwaitVars("Addr")["Addr"]
 	fmt.Println(addr)
 
 	// Run client.
-	c = sh.Fn(nil, get, addr)
+	c = sh.Fn(get, addr)
 	stdout, _ := c.Output()
 	fmt.Print(string(stdout))
 }
@@ -51,7 +51,7 @@ func ExampleFns() {
 func ExampleShellMain() {
 	sh := gosh.NewShell(gosh.ShellOpts{})
 	defer sh.Cleanup()
-	stdout, _ := sh.Main(nil, lib.HelloWorldMain).Output()
+	stdout, _ := sh.Main(lib.HelloWorldMain).Output()
 	fmt.Print(string(stdout))
 }
 

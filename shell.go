@@ -30,13 +30,12 @@ const (
 )
 
 var (
-	errAlreadyCalledCleanup  = errors.New("already called cleanup")
-	errAlreadyCalledStart    = errors.New("already called start")
-	errAlreadyCalledWait     = errors.New("already called wait")
-	errNeedMaybeRunFnAndExit = errors.New("did not call MaybeRunFnAndExit")
+	errAlreadyCalledCleanup   = errors.New("already called cleanup")
+	errAlreadyCalledStart     = errors.New("already called start")
+	errAlreadyCalledWait      = errors.New("already called wait")
+	errBeforeStartOrAfterWait = errors.New("called before start or after wait")
+	errNeedMaybeRunFnAndExit  = errors.New("did not call MaybeRunFnAndExit")
 )
-
-// TODO: Add timeout to Cmd.{AwaitReady,AwaitVars,Wait,Run}, Shell.Wait, etc.
 
 ////////////////////////////////////////////////////////////////////////////////
 // Cmd
@@ -46,8 +45,14 @@ var (
 // the Shell.
 // Not thread-safe.
 type Cmd struct {
-	c              *exec.Cmd
-	sh             *Shell
+	sh *Shell
+	c  *exec.Cmd
+	// Parameters passed to newCmd, needed by With{Env,Opts}.
+	opts CmdOpts
+	env  []string
+	name string
+	args []string
+	// Internal state.
 	calledStart    bool
 	calledWait     bool
 	stdoutWriters  []io.Writer
@@ -59,11 +64,32 @@ type Cmd struct {
 	vars           map[string]string // protected by condVars.L
 }
 
-// TODO:
-// - Add WithOpts method that returns a new Cmd with the specified options
-//   (overriding ShellOpts).
-// - Maybe add a method to send SIGINT, wait a bit, then send SIGKILL if the
-//   process hasn't exited.
+// CmdOpts configures Cmd.
+type CmdOpts struct {
+	// See ShellOpts.SuppressChildOutput.
+	SuppressOutput bool
+	// See ShellOpts.ChildOutputDir.
+	OutputDir string
+}
+
+// WithEnv returns a copy of this Cmd with the given additional env vars.
+func (c *Cmd) WithEnv(env []string) *Cmd {
+	c.sh.ok()
+	env = mapToSlice(mergeMaps(sliceToMap(c.env), sliceToMap(env)))
+	return newCmd(c.sh, c.opts, env, c.name, c.args...)
+}
+
+// WithOpts returns a copy of this Cmd with the given CmdOpts.
+func (c *Cmd) WithOpts(opts CmdOpts) *Cmd {
+	c.sh.ok()
+	return newCmd(c.sh, opts, c.env, c.name, c.args...)
+}
+
+// Opts returns the CmdOpts for this Cmd.
+func (c *Cmd) Opts() CmdOpts {
+	c.sh.ok()
+	return c.opts
+}
 
 // Stdout returns a Reader backed by a buffered pipe for this command's stdout.
 // Must be called before Start. May be called more than once; each invocation
@@ -113,20 +139,13 @@ func (c *Cmd) Wait() {
 	c.sh.SetErr(c.wait())
 }
 
+// TODO: Maybe add a method to send SIGINT, wait for a bit, then send SIGKILL if
+// the process hasn't exited.
+
 // Shutdown sends the given signal to this command, then waits for it to exit.
 func (c *Cmd) Shutdown(signal syscall.Signal) {
 	c.sh.ok()
-	if err := c.process().Signal(signal); err != nil {
-		c.sh.SetErr(err)
-		return
-	}
-	err := c.wait()
-	if err == nil {
-		return
-	}
-	if _, ok := err.(*exec.ExitError); !ok {
-		c.sh.SetErr(err)
-	}
+	c.sh.SetErr(c.shutdown(signal))
 }
 
 // Run calls Start followed by Wait.
@@ -162,16 +181,23 @@ func (c *Cmd) Process() *os.Process {
 ////////////////////////////////////////
 // Cmd internals
 
-func newCmd(sh *Shell, name string, args ...string) *Cmd {
-	return &Cmd{
-		c:             exec.Command(name, args...),
+func newCmd(sh *Shell, opts CmdOpts, env []string, name string, args ...string) *Cmd {
+	c := &Cmd{
 		sh:            sh,
+		c:             exec.Command(name, args...),
+		opts:          opts,
+		env:           env,
+		name:          name,
+		args:          args,
 		stdoutWriters: []io.Writer{},
 		stderrWriters: []io.Writer{},
 		condReady:     sync.NewCond(&sync.Mutex{}),
 		condVars:      sync.NewCond(&sync.Mutex{}),
 		vars:          map[string]string{},
 	}
+	c.c.Env = env
+	sh.cmds = append(sh.cmds, c)
+	return c
 }
 
 func closeAll(closers []io.Closer) {
@@ -239,15 +265,15 @@ func (c *Cmd) initMultiWriter(f *os.File, t string) (io.Writer, error) {
 	} else {
 		writers = &c.stderrWriters
 	}
-	if !c.sh.opts.SuppressChildOutput {
+	if !c.opts.SuppressOutput {
 		addWriter(writers, f)
 	}
-	if c.sh.opts.ChildOutputDir != "" {
+	if c.opts.OutputDir != "" {
 		suffix := "stderr"
 		if f == os.Stdout {
 			suffix = "stdout"
 		}
-		name := filepath.Join(c.sh.opts.ChildOutputDir, filepath.Base(c.c.Path)+"."+t+"."+suffix)
+		name := filepath.Join(c.opts.OutputDir, filepath.Base(c.c.Path)+"."+t+"."+suffix)
 		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
 			return nil, err
@@ -281,7 +307,6 @@ func (c *Cmd) stderr() (io.Reader, error) {
 	return p, nil
 }
 
-// TODO: Make errors bubble up to Await*() in addition to Wait().
 func (c *Cmd) start() error {
 	if c.calledStart {
 		return errAlreadyCalledStart
@@ -299,7 +324,7 @@ func (c *Cmd) start() error {
 	if c.c.Stderr, err = c.initMultiWriter(os.Stderr, t); err != nil {
 		return err
 	}
-	// TODO: Wrap every child process with a "supervisor" process that calls
+	// TODO: Maybe wrap every child process with a "supervisor" process that calls
 	// WatchParent().
 	err = c.c.Start()
 	if err != nil {
@@ -308,7 +333,12 @@ func (c *Cmd) start() error {
 	return err
 }
 
+// TODO: Add timeouts for Cmd.{awaitReady,awaitVars,wait}.
+
 func (c *Cmd) awaitReady() error {
+	if !c.calledStart || c.calledWait {
+		return errBeforeStartOrAfterWait
+	}
 	// http://golang.org/pkg/sync/#Cond.Wait
 	c.condReady.L.Lock()
 	for !c.ready {
@@ -319,6 +349,9 @@ func (c *Cmd) awaitReady() error {
 }
 
 func (c *Cmd) awaitVars(keys ...string) (map[string]string, error) {
+	if !c.calledStart || c.calledWait {
+		return nil, errBeforeStartOrAfterWait
+	}
 	wantKeys := map[string]bool{}
 	for _, key := range keys {
 		wantKeys[key] = true
@@ -343,12 +376,26 @@ func (c *Cmd) awaitVars(keys ...string) (map[string]string, error) {
 }
 
 func (c *Cmd) wait() error {
-	if c.calledWait {
+	if !c.calledStart {
+		return errors.New("not started")
+	} else if c.calledWait {
 		return errAlreadyCalledWait
 	}
 	err := c.c.Wait()
 	closeAll(c.closeAfterWait)
 	return err
+}
+
+func (c *Cmd) shutdown(signal syscall.Signal) error {
+	if err := c.process().Signal(signal); err != nil {
+		return err
+	}
+	if err := c.wait(); err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Cmd) run() error {
@@ -461,26 +508,26 @@ func (sh *Shell) Opts() ShellOpts {
 }
 
 // Cmd returns a Cmd for an invocation of the named program.
-func (sh *Shell) Cmd(env []string, name string, args ...string) *Cmd {
+func (sh *Shell) Cmd(name string, args ...string) *Cmd {
 	sh.ok()
-	return sh.cmd(env, name, args...)
+	return sh.cmd(nil, name, args...)
 }
 
 // Fn returns a Cmd for an invocation of the given registered Fn.
-func (sh *Shell) Fn(env []string, fn *Fn, args ...interface{}) *Cmd {
+func (sh *Shell) Fn(fn *Fn, args ...interface{}) *Cmd {
 	sh.ok()
-	res, err := sh.fn(env, fn, args...)
+	res, err := sh.fn(fn, args...)
 	sh.SetErr(err)
 	return res
 }
 
 // Main returns a Cmd for an invocation of the given registered main() function.
-// Intended usage: Have your program's main() call RealMain, then write a
-// meta-program that uses Shell.Main to run RealMain in a child process. With
-// this approach, RealMain can be compiled into the meta-program's binary.
-func (sh *Shell) Main(env []string, fn *Fn, args ...string) *Cmd {
+// Intended usage: Have your program's main() call RealMain, then write a parent
+// program that uses Shell.Main to run RealMain in a child process. With this
+// approach, RealMain can be compiled into the parent program's binary.
+func (sh *Shell) Main(fn *Fn, args ...string) *Cmd {
 	sh.ok()
-	res, err := sh.main(env, fn, args...)
+	res, err := sh.main(fn, args...)
 	sh.SetErr(err)
 	return res
 }
@@ -679,14 +726,16 @@ func (sh *Shell) ok() {
 	sh.cleanupMu.Unlock()
 }
 
-func (sh *Shell) cmd(env []string, name string, args ...string) *Cmd {
-	c := newCmd(sh, name, append(args, sh.args...)...)
-	c.c.Env = mapToSlice(mergeMaps(sliceToMap(os.Environ()), sh.vars, sliceToMap(env)))
-	sh.cmds = append(sh.cmds, c)
-	return c
+func (sh *Shell) cmd(envMap map[string]string, name string, args ...string) *Cmd {
+	opts := CmdOpts{
+		SuppressOutput: sh.opts.SuppressChildOutput,
+		OutputDir:      sh.opts.ChildOutputDir,
+	}
+	env := mapToSlice(mergeMaps(sliceToMap(os.Environ()), sh.vars, envMap))
+	return newCmd(sh, opts, env, name, append(args, sh.args...)...)
 }
 
-func (sh *Shell) fn(env []string, fn *Fn, args ...interface{}) (*Cmd, error) {
+func (sh *Shell) fn(fn *Fn, args ...interface{}) (*Cmd, error) {
 	// Safeguard against the developer forgetting to call MaybeRunFnAndExit, which
 	// could lead to infinite recursion.
 	if !calledMaybeRunFnAndExit {
@@ -696,11 +745,11 @@ func (sh *Shell) fn(env []string, fn *Fn, args ...interface{}) (*Cmd, error) {
 	if err != nil {
 		return nil, err
 	}
-	env = mapToSlice(mergeMaps(sliceToMap(env), map[string]string{envInvocation: string(b)}))
-	return sh.cmd(env, os.Args[0]), nil
+	envMap := map[string]string{envInvocation: string(b)}
+	return sh.cmd(envMap, os.Args[0]), nil
 }
 
-func (sh *Shell) main(env []string, fn *Fn, args ...string) (*Cmd, error) {
+func (sh *Shell) main(fn *Fn, args ...string) (*Cmd, error) {
 	// Safeguard against the developer forgetting to call MaybeRunFnAndExit, which
 	// could lead to infinite recursion.
 	if !calledMaybeRunFnAndExit {
@@ -715,8 +764,8 @@ func (sh *Shell) main(env []string, fn *Fn, args ...string) (*Cmd, error) {
 	if err != nil {
 		return nil, err
 	}
-	env = mapToSlice(mergeMaps(sliceToMap(env), map[string]string{envInvocation: string(b)}))
-	return sh.cmd(env, os.Args[0], args...), nil
+	envMap := map[string]string{envInvocation: string(b)}
+	return sh.cmd(envMap, os.Args[0], args...), nil
 }
 
 func (sh *Shell) get(key string) string {
@@ -753,7 +802,7 @@ func (sh *Shell) appendArgs(args ...string) {
 func (sh *Shell) wait() error {
 	var res error
 	for _, c := range sh.cmds {
-		if c.calledWait {
+		if !c.calledStart || c.calledWait {
 			continue
 		}
 		if err := c.wait(); err != nil {

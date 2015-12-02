@@ -7,10 +7,10 @@ import (
 
 func splitKeyValue(kv string) (string, string) {
 	parts := strings.SplitN(kv, "=", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
+	if len(parts) != 2 {
+		panic(kv)
 	}
-	panic(kv)
+	return parts[0], parts[1]
 }
 
 func joinKeyValue(k, v string) string {
