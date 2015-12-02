@@ -833,7 +833,7 @@ func (sh *Shell) buildGoPkg(pkg string, flags ...string) (string, error) {
 	args := []string{"build", "-x", "-o", tempBinPath}
 	args = append(args, flags...)
 	args = append(args, pkg)
-	if err := sh.cmd(nil, "go", args...).run(); err != nil {
+	if err := sh.cmd(nil, "go", args...).WithOpts(CmdOpts{SuppressOutput: true}).run(); err != nil {
 		return "", err
 	}
 	if err := os.Rename(tempBinPath, binPath); err != nil {
