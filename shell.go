@@ -413,10 +413,27 @@ func (c *Cmd) output() ([]byte, []byte, error) {
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 
+type threadSafeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *threadSafeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *threadSafeBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Bytes()
+}
+
 func (c *Cmd) combinedOutput() ([]byte, error) {
-	var buf bytes.Buffer
-	addWriter(&c.stdoutWriters, &buf)
-	addWriter(&c.stderrWriters, &buf)
+	buf := &threadSafeBuffer{}
+	addWriter(&c.stdoutWriters, buf)
+	addWriter(&c.stderrWriters, buf)
 	err := c.run()
 	return buf.Bytes(), err
 }
@@ -997,7 +1014,7 @@ type invocation struct {
 // encInvocation encodes an invocation.
 func encInvocation(name string, args ...interface{}) (string, error) {
 	inv := invocation{Name: name, Args: args}
-	buf := new(bytes.Buffer)
+	buf := &bytes.Buffer{}
 	if err := gob.NewEncoder(buf).Encode(inv); err != nil {
 		return "", fmt.Errorf("failed to encode invocation: %v", err)
 	}
