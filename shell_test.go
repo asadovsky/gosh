@@ -130,7 +130,7 @@ func TestPushdPopd(t *testing.T) {
 }
 
 func TestCmds(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{T: t, SuppressChildOutput: true})
+	sh := gosh.NewShell(gosh.ShellOpts{T: t})
 	defer sh.Cleanup()
 
 	// Start server.
@@ -154,7 +154,7 @@ var (
 )
 
 func TestFns(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{T: t, SuppressChildOutput: true})
+	sh := gosh.NewShell(gosh.ShellOpts{T: t})
 	defer sh.Cleanup()
 
 	// Start server.

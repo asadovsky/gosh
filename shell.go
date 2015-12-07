@@ -718,18 +718,18 @@ func newShell(opts ShellOpts) (*Shell, error) {
 
 func (sh *Shell) log(args ...interface{}) {
 	if sh.opts.T == nil {
-		log.Print(args...)
+		log.Println(args...)
 	} else {
 		sh.opts.T.Log(args...)
 	}
 }
 
 func (sh *Shell) warningf(format string, args ...interface{}) {
-	sh.log(fmt.Sprintf("WARNING: %s\n", fmt.Sprintf(format, args...)))
+	sh.log(fmt.Sprintf("WARNING: "+format, args...))
 }
 
 func (sh *Shell) errorf(format string, args ...interface{}) {
-	sh.log(fmt.Sprintf("ERROR: %s\n", fmt.Sprintf(format, args...)))
+	sh.log(fmt.Sprintf("ERROR: "+format, args...))
 }
 
 func (sh *Shell) ok() {
