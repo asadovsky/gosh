@@ -143,9 +143,9 @@ func (c *Cmd) Wait() {
 // the process hasn't exited.
 
 // Shutdown sends the given signal to this command, then waits for it to exit.
-func (c *Cmd) Shutdown(signal syscall.Signal) {
+func (c *Cmd) Shutdown(sig os.Signal) {
 	c.sh.ok()
-	c.sh.SetErr(c.shutdown(signal))
+	c.sh.SetErr(c.shutdown(sig))
 }
 
 // Run calls Start followed by Wait.
@@ -386,8 +386,8 @@ func (c *Cmd) wait() error {
 	return err
 }
 
-func (c *Cmd) shutdown(signal syscall.Signal) error {
-	if err := c.process().Signal(signal); err != nil {
+func (c *Cmd) shutdown(sig os.Signal) error {
+	if err := c.process().Signal(sig); err != nil {
 		return err
 	}
 	if err := c.wait(); err != nil {
@@ -697,8 +697,8 @@ func newShell(opts ShellOpts) (*Shell, error) {
 		}
 	}
 	// Call sh.cleanup() if needed when a termination signal is received.
-	onTerminationSignal(func(signal os.Signal) {
-		sh.warningf("Received signal: %v", signal)
+	onTerminationSignal(func(sig os.Signal) {
+		sh.warningf("Received signal: %v", sig)
 		sh.cleanupMu.Lock()
 		if !sh.calledCleanup {
 			sh.calledCleanup = true
@@ -707,7 +707,7 @@ func newShell(opts ShellOpts) (*Shell, error) {
 		} else {
 			sh.cleanupMu.Unlock()
 		}
-		if s, ok := signal.(syscall.Signal); !ok {
+		if s, ok := sig.(syscall.Signal); !ok {
 			os.Exit(1)
 		} else {
 			os.Exit(int(s))
@@ -926,7 +926,7 @@ func (sh *Shell) cleanup() {
 	// doesn't work, use SIGKILL.
 	// https://golang.org/pkg/os/#Process.Signal
 	anyRunning := sh.forEachRunningCmd(func(c *Cmd) {
-		if err := c.process().Signal(syscall.SIGINT); err != nil {
+		if err := c.process().Signal(os.Interrupt); err != nil {
 			sh.warningf("%d.Signal(SIGINT) failed: %v", c.process().Pid, err)
 		}
 	})

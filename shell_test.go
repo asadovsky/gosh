@@ -17,7 +17,6 @@ import (
 	"reflect"
 	"runtime/debug"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -227,7 +226,7 @@ func TestShutdown(t *testing.T) {
 	defer sh.Cleanup()
 
 	for _, d := range []time.Duration{0, time.Second} {
-		for _, s := range []syscall.Signal{syscall.SIGINT, syscall.SIGKILL} {
+		for _, s := range []os.Signal{os.Interrupt, os.Kill} {
 			fmt.Println(d, s)
 			c := sh.Fn(sleep, d)
 			c.Start()
