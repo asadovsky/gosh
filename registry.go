@@ -3,7 +3,9 @@ package gosh
 // Inspired by https://github.com/golang/appengine/blob/master/delay/delay.go.
 
 import (
+	"bytes"
 	"encoding/gob"
+	"encoding/hex"
 	"fmt"
 	"reflect"
 )
@@ -82,4 +84,37 @@ func (fn *Fn) Call(args ...interface{}) error {
 		return out[0].Interface().(error)
 	}
 	return nil
+}
+
+////////////////////////////////////////
+// invocation
+
+type invocation struct {
+	Name string
+	Args []interface{}
+}
+
+// encInvocation encodes an invocation.
+func encInvocation(name string, args ...interface{}) (string, error) {
+	inv := invocation{Name: name, Args: args}
+	buf := &bytes.Buffer{}
+	if err := gob.NewEncoder(buf).Encode(inv); err != nil {
+		return "", fmt.Errorf("failed to encode invocation: %v", err)
+	}
+	// Hex-encode the gob-encoded bytes so that the result can be used as an env
+	// var value.
+	return hex.EncodeToString(buf.Bytes()), nil
+}
+
+// decInvocation decodes an invocation.
+func decInvocation(s string) (name string, args []interface{}, err error) {
+	var inv invocation
+	b, err := hex.DecodeString(s)
+	if err == nil {
+		err = gob.NewDecoder(bytes.NewReader(b)).Decode(&inv)
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to decode invocation: %v", err)
+	}
+	return inv.Name, inv.Args, nil
 }

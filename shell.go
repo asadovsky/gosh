@@ -1,457 +1,42 @@
+// Package gosh provides facilities for running and managing processes.
 package gosh
 
 import (
-	"bytes"
-	"encoding/gob"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path"
 	"path/filepath"
-	"runtime/debug"
 	"sync"
 	"syscall"
-	"testing"
 	"time"
 )
 
 const (
-	envBinDir              = "GOSH_BIN_DIR"
-	envChildOutputDir      = "GOSH_CHILD_OUTPUT_DIR"
-	envInvocation          = "GOSH_INVOCATION"
-	envSuppressChildOutput = "GOSH_SUPPRESS_CHILD_OUTPUT"
+	envBinDir         = "GOSH_BIN_DIR"
+	envChildOutputDir = "GOSH_CHILD_OUTPUT_DIR"
+	envInvocation     = "GOSH_INVOCATION"
 )
 
 var (
-	errAlreadyCalledCleanup   = errors.New("already called cleanup")
-	errAlreadyCalledStart     = errors.New("already called start")
-	errAlreadyCalledWait      = errors.New("already called wait")
-	errBeforeStartOrAfterWait = errors.New("called before start or after wait")
-	errNeedMaybeRunFnAndExit  = errors.New("did not call MaybeRunFnAndExit")
+	errAlreadyCalledCleanup  = errors.New("already called cleanup")
+	errNeedMaybeRunFnAndExit = errors.New("did not call MaybeRunFnAndExit")
 )
 
-////////////////////////////////////////////////////////////////////////////////
-// Cmd
-
-// Cmd represents a command.
-// All configuration of env vars and args for this command should be done via
-// the Shell.
-// Not thread-safe.
-type Cmd struct {
-	sh *Shell
-	c  *exec.Cmd
-	// Parameters passed to newCmd, needed by With{Env,Opts}.
-	opts CmdOpts
-	env  []string
-	name string
-	args []string
-	// Internal state.
-	calledStart    bool
-	calledWait     bool
-	stdoutWriters  []io.Writer
-	stderrWriters  []io.Writer
-	closeAfterWait []io.Closer
-	condReady      *sync.Cond
-	ready          bool // protected by condReady.L
-	condVars       *sync.Cond
-	vars           map[string]string // protected by condVars.L
-}
-
-// CmdOpts configures Cmd.
-type CmdOpts struct {
-	// See ShellOpts.SuppressChildOutput.
-	SuppressOutput bool
-	// See ShellOpts.ChildOutputDir.
-	OutputDir string
-}
-
-// WithEnv returns a copy of this Cmd with the given additional env vars.
-func (c *Cmd) WithEnv(env []string) *Cmd {
-	c.sh.ok()
-	env = mapToSlice(mergeMaps(sliceToMap(c.env), sliceToMap(env)))
-	return newCmd(c.sh, c.opts, env, c.name, c.args...)
-}
-
-// WithOpts returns a copy of this Cmd with the given CmdOpts.
-func (c *Cmd) WithOpts(opts CmdOpts) *Cmd {
-	c.sh.ok()
-	return newCmd(c.sh, opts, c.env, c.name, c.args...)
-}
-
-// Opts returns the CmdOpts for this Cmd.
-func (c *Cmd) Opts() CmdOpts {
-	c.sh.ok()
-	return c.opts
-}
-
-// Stdout returns a Reader backed by a buffered pipe for this command's stdout.
-// Must be called before Start. May be called more than once; each invocation
-// creates a new pipe.
-func (c *Cmd) Stdout() io.Reader {
-	c.sh.ok()
-	res, err := c.stdout()
-	c.sh.SetErr(err)
-	return res
-}
-
-// Stderr returns a Reader backed by a buffered pipe for this command's stderr.
-// Must be called before Start. May be called more than once; each invocation
-// creates a new pipe.
-func (c *Cmd) Stderr() io.Reader {
-	c.sh.ok()
-	res, err := c.stderr()
-	c.sh.SetErr(err)
-	return res
-}
-
-// Start starts this command.
-func (c *Cmd) Start() {
-	c.sh.ok()
-	c.sh.SetErr(c.start())
-}
-
-// AwaitReady waits for the child process to call SendReady. Must not be called
-// before Start or after Wait.
-func (c *Cmd) AwaitReady() {
-	c.sh.ok()
-	c.sh.SetErr(c.awaitReady())
-}
-
-// AwaitVars waits for the child process to send values for the given vars
-// (using SendVars). Must not be called before Start or after Wait.
-func (c *Cmd) AwaitVars(keys ...string) map[string]string {
-	c.sh.ok()
-	res, err := c.awaitVars(keys...)
-	c.sh.SetErr(err)
-	return res
-}
-
-// Wait waits for this command to exit.
-func (c *Cmd) Wait() {
-	c.sh.ok()
-	c.sh.SetErr(c.wait())
-}
-
-// TODO: Maybe add a method to send SIGINT, wait for a bit, then send SIGKILL if
-// the process hasn't exited.
-
-// Shutdown sends the given signal to this command, then waits for it to exit.
-func (c *Cmd) Shutdown(sig os.Signal) {
-	c.sh.ok()
-	c.sh.SetErr(c.shutdown(sig))
-}
-
-// Run calls Start followed by Wait.
-func (c *Cmd) Run() {
-	c.sh.ok()
-	c.sh.SetErr(c.run())
-}
-
-// Output calls Start followed by Wait, then returns this command's stdout and
-// stderr.
-func (c *Cmd) Output() ([]byte, []byte) {
-	c.sh.ok()
-	stdout, stderr, err := c.output()
-	c.sh.SetErr(err)
-	return stdout, stderr
-}
-
-// CombinedOutput calls Start followed by Wait, then returns this command's
-// combined stdout and stderr.
-func (c *Cmd) CombinedOutput() []byte {
-	c.sh.ok()
-	res, err := c.combinedOutput()
-	c.sh.SetErr(err)
-	return res
-}
-
-// Process returns the underlying process handle for this command.
-func (c *Cmd) Process() *os.Process {
-	c.sh.ok()
-	return c.process()
-}
-
-////////////////////////////////////////
-// Cmd internals
-
-func newCmd(sh *Shell, opts CmdOpts, env []string, name string, args ...string) *Cmd {
-	c := &Cmd{
-		sh:            sh,
-		c:             exec.Command(name, args...),
-		opts:          opts,
-		env:           env,
-		name:          name,
-		args:          args,
-		stdoutWriters: []io.Writer{},
-		stderrWriters: []io.Writer{},
-		condReady:     sync.NewCond(&sync.Mutex{}),
-		condVars:      sync.NewCond(&sync.Mutex{}),
-		vars:          map[string]string{},
-	}
-	c.c.Env = env
-	sh.cmds = append(sh.cmds, c)
-	return c
-}
-
-func closeAll(closers []io.Closer) {
-	for _, c := range closers {
-		c.Close()
-	}
-}
-
-func addWriter(writers *[]io.Writer, w io.Writer) {
-	*writers = append(*writers, w)
-}
-
-// recvWriter listens for gosh messages from a child process.
-type recvWriter struct {
-	c          *Cmd
-	buf        bytes.Buffer
-	readPrefix bool // if true, we've read len(msgPrefix) for the current line
-	skipLine   bool // if true, ignore bytes until next '\n'
-}
-
-func (w *recvWriter) Write(p []byte) (n int, err error) {
-	for _, b := range p {
-		if b == '\n' {
-			if w.readPrefix && !w.skipLine {
-				m := msg{}
-				if err := json.Unmarshal(w.buf.Bytes(), &m); err != nil {
-					return 0, err
-				}
-				switch m.Type {
-				case typeReady:
-					w.c.condReady.L.Lock()
-					w.c.ready = true
-					w.c.condReady.Signal()
-					w.c.condReady.L.Unlock()
-				case typeVars:
-					w.c.condVars.L.Lock()
-					w.c.vars = mergeMaps(w.c.vars, m.Vars)
-					w.c.condVars.Signal()
-					w.c.condVars.L.Unlock()
-				default:
-					return 0, fmt.Errorf("unknown message type: %q", m.Type)
-				}
-			}
-			// Reset state for next line.
-			w.readPrefix, w.skipLine = false, false
-			w.buf.Reset()
-		} else if !w.skipLine {
-			w.buf.WriteByte(b)
-			if !w.readPrefix && w.buf.Len() == len(msgPrefix) {
-				w.readPrefix = true
-				prefix := string(w.buf.Next(len(msgPrefix)))
-				if prefix != msgPrefix {
-					w.skipLine = true
-				}
-			}
-		}
-	}
-	return len(p), nil
-}
-
-func (c *Cmd) initMultiWriter(f *os.File, t string) (io.Writer, error) {
-	var writers *[]io.Writer
-	if f == os.Stdout {
-		writers = &c.stdoutWriters
-	} else {
-		writers = &c.stderrWriters
-	}
-	if !c.opts.SuppressOutput {
-		addWriter(writers, f)
-	}
-	if c.opts.OutputDir != "" {
-		suffix := "stderr"
-		if f == os.Stdout {
-			suffix = "stdout"
-		}
-		name := filepath.Join(c.opts.OutputDir, filepath.Base(c.c.Path)+"."+t+"."+suffix)
-		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err != nil {
-			return nil, err
-		}
-		addWriter(writers, f)
-		c.closeAfterWait = append(c.closeAfterWait, f)
-	}
-	if f == os.Stdout {
-		addWriter(writers, &recvWriter{c: c})
-	}
-	return io.MultiWriter(*writers...), nil
-}
-
-func (c *Cmd) stdout() (io.Reader, error) {
-	if c.calledStart {
-		return nil, errAlreadyCalledStart
-	}
-	p := newPipe()
-	addWriter(&c.stdoutWriters, p)
-	c.closeAfterWait = append(c.closeAfterWait, p)
-	return p, nil
-}
-
-func (c *Cmd) stderr() (io.Reader, error) {
-	if c.calledStart {
-		return nil, errAlreadyCalledStart
-	}
-	p := newPipe()
-	addWriter(&c.stderrWriters, p)
-	c.closeAfterWait = append(c.closeAfterWait, p)
-	return p, nil
-}
-
-func (c *Cmd) start() error {
-	if c.calledStart {
-		return errAlreadyCalledStart
-	}
-	c.calledStart = true
-	if c.c.Stdout != nil || c.c.Stderr != nil { // invariant check
-		log.Fatal(c.c.Stdout, c.c.Stderr)
-	}
-	// Set up stdout and stderr.
-	t := time.Now().UTC().Format("20060102.150405.000000")
-	var err error
-	if c.c.Stdout, err = c.initMultiWriter(os.Stdout, t); err != nil {
-		return err
-	}
-	if c.c.Stderr, err = c.initMultiWriter(os.Stderr, t); err != nil {
-		return err
-	}
-	// TODO: Maybe wrap every child process with a "supervisor" process that calls
-	// WatchParent().
-	err = c.c.Start()
-	if err != nil {
-		closeAll(c.closeAfterWait)
-	}
-	return err
-}
-
-// TODO: Add timeouts for Cmd.{awaitReady,awaitVars,wait}.
-
-func (c *Cmd) awaitReady() error {
-	if !c.calledStart || c.calledWait {
-		return errBeforeStartOrAfterWait
-	}
-	// http://golang.org/pkg/sync/#Cond.Wait
-	c.condReady.L.Lock()
-	for !c.ready {
-		c.condReady.Wait()
-	}
-	c.condReady.L.Unlock()
-	return nil
-}
-
-func (c *Cmd) awaitVars(keys ...string) (map[string]string, error) {
-	if !c.calledStart || c.calledWait {
-		return nil, errBeforeStartOrAfterWait
-	}
-	wantKeys := map[string]bool{}
-	for _, key := range keys {
-		wantKeys[key] = true
-	}
-	res := map[string]string{}
-	updateRes := func() {
-		for k, v := range c.vars {
-			if _, ok := wantKeys[k]; ok {
-				res[k] = v
-			}
-		}
-	}
-	// http://golang.org/pkg/sync/#Cond.Wait
-	c.condVars.L.Lock()
-	updateRes()
-	for len(res) < len(wantKeys) {
-		c.condVars.Wait()
-		updateRes()
-	}
-	c.condVars.L.Unlock()
-	return res, nil
-}
-
-func (c *Cmd) wait() error {
-	if !c.calledStart {
-		return errors.New("not started")
-	} else if c.calledWait {
-		return errAlreadyCalledWait
-	}
-	err := c.c.Wait()
-	closeAll(c.closeAfterWait)
-	return err
-}
-
-func (c *Cmd) shutdown(sig os.Signal) error {
-	if err := c.process().Signal(sig); err != nil {
-		return err
-	}
-	if err := c.wait(); err != nil {
-		if _, ok := err.(*exec.ExitError); !ok {
-			return err
-		}
-	}
-	return nil
-}
-
-func (c *Cmd) run() error {
-	if err := c.start(); err != nil {
-		return err
-	}
-	return c.wait()
-}
-
-func (c *Cmd) output() ([]byte, []byte, error) {
-	var stdout, stderr bytes.Buffer
-	addWriter(&c.stdoutWriters, &stdout)
-	addWriter(&c.stderrWriters, &stderr)
-	err := c.run()
-	return stdout.Bytes(), stderr.Bytes(), err
-}
-
-type threadSafeBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *threadSafeBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *threadSafeBuffer) Bytes() []byte {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Bytes()
-}
-
-func (c *Cmd) combinedOutput() ([]byte, error) {
-	buf := &threadSafeBuffer{}
-	addWriter(&c.stdoutWriters, buf)
-	addWriter(&c.stderrWriters, buf)
-	err := c.run()
-	return buf.Bytes(), err
-}
-
-func (c *Cmd) process() *os.Process {
-	return c.c.Process
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Shell
-
-// Shell represents a shell with an environment (a set of vars).
-// Not thread-safe.
+// Shell represents a shell. Not thread-safe.
 type Shell struct {
-	err           error
-	opts          ShellOpts
-	vars          map[string]string
-	args          []string
+	// Err is the most recent error (may be nil).
+	Err error
+	// Opts is the ShellOpts for this Shell, with default values filled in.
+	Opts ShellOpts
+	// Vars is the map of env vars for this Shell.
+	Vars map[string]string
+	// Args is the list of args to append to subsequent command invocations.
+	Args []string
+	// Internal state.
 	cmds          []*Cmd
 	tempFiles     []*os.File
 	tempDirs      []string
@@ -463,16 +48,14 @@ type Shell struct {
 
 // ShellOpts configures Shell.
 type ShellOpts struct {
-	// If not nil, errors trigger T.Fatal instead of panic.
-	T *testing.T
-	// If true, errors are logged but are not fatal. Errors can be accessed via
-	// Shell.Err(). All methods except Shell.{Err,SetErr,ClearErr,Cleanup} panic
-	// if Shell.Err() is not nil.
-	NoDieOnErr bool
-	// By default, child stdout and stderr are propagated up to the parent's
-	// stdout and stderr. If SuppressChildOutput is true, child stdout and stderr
-	// are not propagated up.
-	// If not specified, defaults to (GOSH_SUPPRESS_CHILD_OUTPUT != "").
+	// OnError is called whenever an error is encountered.
+	// If not specified, defaults to panic(err).
+	OnError func(err error)
+	// OnLog is called to log things.
+	// If not specified, defaults to log.Println(args...).
+	OnLog func(args ...interface{})
+	// Child stdout and stderr are propagated up to the parent's stdout and stderr
+	// iff SuppressChildOutput is false.
 	SuppressChildOutput bool
 	// If specified, each child's stdout and stderr streams are also piped to
 	// files in this directory.
@@ -490,44 +73,20 @@ func NewShell(opts ShellOpts) *Shell {
 	return sh
 }
 
-// Err returns the error, which may be nil.
-func (sh *Shell) Err() error {
-	return sh.err
-}
-
-// SetErr sets the error.
+// SetErr sets sh.Err. If err is not nil, it also calls sh.Opts.OnError.
 func (sh *Shell) SetErr(err error) {
-	if err == nil || sh.err != nil {
-		return
+	sh.Err = err
+	if err != nil && sh.Opts.OnError != nil {
+		sh.Opts.OnError(err)
 	}
-	sh.err = err
-	if sh.opts.NoDieOnErr {
-		sh.errorf(err.Error())
-	} else {
-		if sh.opts.T == nil {
-			panic(err)
-		} else {
-			debug.PrintStack()
-			sh.opts.T.Fatal(err)
-		}
-	}
-}
-
-// ClearErr clears the error.
-func (sh *Shell) ClearErr() {
-	sh.err = nil
-}
-
-// Opts returns the ShellOpts for this Shell, with default values filled in.
-func (sh *Shell) Opts() ShellOpts {
-	sh.ok()
-	return sh.opts
 }
 
 // Cmd returns a Cmd for an invocation of the named program.
 func (sh *Shell) Cmd(name string, args ...string) *Cmd {
 	sh.ok()
-	return sh.cmd(nil, name, args...)
+	res, err := sh.cmd(nil, name, args...)
+	sh.SetErr(err)
+	return res
 }
 
 // Fn returns a Cmd for an invocation of the given registered Fn.
@@ -541,7 +100,8 @@ func (sh *Shell) Fn(fn *Fn, args ...interface{}) *Cmd {
 // Main returns a Cmd for an invocation of the given registered main() function.
 // Intended usage: Have your program's main() call RealMain, then write a parent
 // program that uses Shell.Main to run RealMain in a child process. With this
-// approach, RealMain can be compiled into the parent program's binary.
+// approach, RealMain can be compiled into the parent program's binary. Caveat:
+// potential flag collisions.
 func (sh *Shell) Main(fn *Fn, args ...string) *Cmd {
 	sh.ok()
 	res, err := sh.main(fn, args...)
@@ -573,20 +133,6 @@ func (sh *Shell) SetMany(vars ...string) {
 	sh.setMany(vars...)
 }
 
-// Env returns this Shell's env vars, excluding preexisting vars.
-func (sh *Shell) Env() []string {
-	sh.ok()
-	return sh.env()
-}
-
-// AppendArgs configures this Shell to append the given args to all subsequent
-// commands that it runs. For example, can be used to propagate logging flags to
-// all child processes.
-func (sh *Shell) AppendArgs(args ...string) {
-	sh.ok()
-	sh.appendArgs(args...)
-}
-
 // Wait waits for all commands started by this Shell to exit.
 func (sh *Shell) Wait() {
 	sh.ok()
@@ -594,8 +140,8 @@ func (sh *Shell) Wait() {
 }
 
 // BuildGoPkg compiles a Go package using the "go build" command and writes the
-// resulting binary to ShellOpts.BinDir. Returns the absolute path to the
-// binary. Included in Shell for convenience, but could have just as easily been
+// resulting binary to sh.Opts.BinDir. Returns the absolute path to the binary.
+// Included in Shell for convenience, but could have just as easily been
 // provided as a utility function.
 func (sh *Shell) BuildGoPkg(pkg string, flags ...string) string {
 	sh.ok()
@@ -639,6 +185,7 @@ func (sh *Shell) Popd() {
 func (sh *Shell) Cleanup() {
 	sh.cleanupMu.Lock()
 	if sh.calledCleanup {
+		sh.cleanupMu.Unlock()
 		panic(errAlreadyCalledCleanup)
 	}
 	sh.calledCleanup = true
@@ -653,7 +200,7 @@ func (sh *Shell) AddToCleanup(fn func()) {
 }
 
 ////////////////////////////////////////
-// Shell internals
+// Internals
 
 // onTerminationSignal starts a goroutine that listens for various termination
 // signals and calls the given function when such a signal is received.
@@ -666,35 +213,41 @@ func onTerminationSignal(fn func(os.Signal)) {
 }
 
 func newShell(opts ShellOpts) (*Shell, error) {
-	// Set this process's PGID to its PID so that its child processes can be
-	// identified reliably.
-	// http://man7.org/linux/man-pages/man2/setpgid.2.html
-	if err := syscall.Setpgid(0, 0); err != nil {
-		return nil, err
+	if opts.OnError == nil {
+		opts.OnError = func(err error) { panic(err) }
 	}
-	if !opts.SuppressChildOutput {
-		opts.SuppressChildOutput = os.Getenv(envSuppressChildOutput) != ""
+	if opts.OnLog == nil {
+		opts.OnLog = func(args ...interface{}) { log.Println(args...) }
 	}
 	if opts.ChildOutputDir == "" {
 		opts.ChildOutputDir = os.Getenv(envChildOutputDir)
 	}
 	sh := &Shell{
-		opts:      opts,
-		vars:      map[string]string{},
-		args:      []string{},
-		cmds:      []*Cmd{},
-		tempFiles: []*os.File{},
-		tempDirs:  []string{},
-		dirStack:  []string{},
+		Opts:       opts,
+		Vars:       map[string]string{},
+		Args:       []string{},
+		cmds:       []*Cmd{},
+		tempFiles:  []*os.File{},
+		tempDirs:   []string{},
+		dirStack:   []string{},
+		cleanupFns: []func(){},
 	}
-	if sh.opts.BinDir == "" {
-		sh.opts.BinDir = os.Getenv(envBinDir)
-		if sh.opts.BinDir == "" {
+	if sh.Opts.BinDir == "" {
+		sh.Opts.BinDir = os.Getenv(envBinDir)
+		if sh.Opts.BinDir == "" {
 			var err error
-			if sh.opts.BinDir, err = sh.makeTempDir(); err != nil {
-				return nil, err
+			if sh.Opts.BinDir, err = sh.makeTempDir(); err != nil {
+				return sh, err // NewShell will call sh.SetErr
 			}
 		}
+	}
+	// Set this process's PGID to its PID so that its child processes can be
+	// identified reliably.
+	// http://man7.org/linux/man-pages/man2/setpgid.2.html
+	// TODO: Is there any way to reliably kill all spawned subprocesses without
+	// modifying external state?
+	if err := syscall.Setpgid(0, 0); err != nil {
+		return sh, err // NewShell will call sh.SetErr
 	}
 	// Call sh.cleanup() if needed when a termination signal is received.
 	onTerminationSignal(func(sig os.Signal) {
@@ -717,10 +270,8 @@ func newShell(opts ShellOpts) (*Shell, error) {
 }
 
 func (sh *Shell) log(args ...interface{}) {
-	if sh.opts.T == nil {
-		log.Println(args...)
-	} else {
-		sh.opts.T.Log(args...)
+	if sh.Opts.OnLog != nil {
+		sh.Opts.OnLog(args...)
 	}
 }
 
@@ -733,23 +284,20 @@ func (sh *Shell) errorf(format string, args ...interface{}) {
 }
 
 func (sh *Shell) ok() {
-	if sh.err != nil {
-		panic(sh.err)
-	}
 	sh.cleanupMu.Lock()
+	defer sh.cleanupMu.Unlock()
 	if sh.calledCleanup {
 		panic(errAlreadyCalledCleanup)
 	}
-	sh.cleanupMu.Unlock()
 }
 
-func (sh *Shell) cmd(envMap map[string]string, name string, args ...string) *Cmd {
+func (sh *Shell) cmd(vars map[string]string, name string, args ...string) (*Cmd, error) {
 	opts := CmdOpts{
-		SuppressOutput: sh.opts.SuppressChildOutput,
-		OutputDir:      sh.opts.ChildOutputDir,
+		SuppressOutput: sh.Opts.SuppressChildOutput,
+		OutputDir:      sh.Opts.ChildOutputDir,
 	}
-	env := mapToSlice(mergeMaps(sliceToMap(os.Environ()), sh.vars, envMap))
-	return newCmd(sh, opts, env, name, append(args, sh.args...)...)
+	vars = mergeMaps(sliceToMap(os.Environ()), sh.Vars, vars)
+	return newCmd(sh, opts, vars, name, append(args, sh.Args...)...)
 }
 
 func (sh *Shell) fn(fn *Fn, args ...interface{}) (*Cmd, error) {
@@ -762,8 +310,8 @@ func (sh *Shell) fn(fn *Fn, args ...interface{}) (*Cmd, error) {
 	if err != nil {
 		return nil, err
 	}
-	envMap := map[string]string{envInvocation: string(b)}
-	return sh.cmd(envMap, os.Args[0]), nil
+	vars := map[string]string{envInvocation: string(b)}
+	return sh.cmd(vars, os.Args[0])
 }
 
 func (sh *Shell) main(fn *Fn, args ...string) (*Cmd, error) {
@@ -781,45 +329,37 @@ func (sh *Shell) main(fn *Fn, args ...string) (*Cmd, error) {
 	if err != nil {
 		return nil, err
 	}
-	envMap := map[string]string{envInvocation: string(b)}
-	return sh.cmd(envMap, os.Args[0], args...), nil
+	vars := map[string]string{envInvocation: string(b)}
+	return sh.cmd(vars, os.Args[0], args...)
 }
 
 func (sh *Shell) get(key string) string {
-	return sh.vars[key]
+	return sh.Vars[key]
 }
 
 func (sh *Shell) set(key, value string) {
-	sh.vars[key] = value
+	sh.Vars[key] = value
 }
 
 func (sh *Shell) setMany(vars ...string) {
 	for _, kv := range vars {
 		k, v := splitKeyValue(kv)
 		if v == "" {
-			delete(sh.vars, k)
+			delete(sh.Vars, k)
 		} else {
-			sh.vars[k] = v
+			sh.Vars[k] = v
 		}
 	}
 }
 
 func (sh *Shell) unset(key string) {
-	delete(sh.vars, key)
-}
-
-func (sh *Shell) env() []string {
-	return mapToSlice(sh.vars)
-}
-
-func (sh *Shell) appendArgs(args ...string) {
-	sh.args = append(sh.args, args...)
+	delete(sh.Vars, key)
 }
 
 func (sh *Shell) wait() error {
 	var res error
 	for _, c := range sh.cmds {
-		if !c.calledStart || c.calledWait {
+		if !c.calledStart() || c.calledWait {
 			continue
 		}
 		if err := c.wait(); err != nil {
@@ -833,7 +373,7 @@ func (sh *Shell) wait() error {
 }
 
 func (sh *Shell) buildGoPkg(pkg string, flags ...string) (string, error) {
-	binPath := filepath.Join(sh.opts.BinDir, path.Base(pkg))
+	binPath := filepath.Join(sh.Opts.BinDir, path.Base(pkg))
 	// If this binary has already been built, don't rebuild it.
 	if _, err := os.Stat(binPath); err == nil {
 		return binPath, nil
@@ -841,7 +381,7 @@ func (sh *Shell) buildGoPkg(pkg string, flags ...string) (string, error) {
 		return "", err
 	}
 	// Build binary to tempBinPath, then move it to binPath.
-	tempDir, err := ioutil.TempDir(sh.opts.BinDir, "")
+	tempDir, err := ioutil.TempDir(sh.Opts.BinDir, "")
 	if err != nil {
 		return "", err
 	}
@@ -850,7 +390,12 @@ func (sh *Shell) buildGoPkg(pkg string, flags ...string) (string, error) {
 	args := []string{"build", "-x", "-o", tempBinPath}
 	args = append(args, flags...)
 	args = append(args, pkg)
-	if err := sh.cmd(nil, "go", args...).WithOpts(CmdOpts{SuppressOutput: true}).run(); err != nil {
+	c, err := sh.cmd(nil, "go", args...)
+	if err != nil {
+		return "", err
+	}
+	c.Opts.SuppressOutput = true
+	if err := c.run(); err != nil {
 		return "", err
 	}
 	if err := os.Rename(tempBinPath, binPath); err != nil {
@@ -905,7 +450,7 @@ func (sh *Shell) popd() error {
 func (sh *Shell) forEachRunningCmd(fn func(*Cmd)) bool {
 	anyRunning := false
 	for _, c := range sh.cmds {
-		if c.c.Process == nil {
+		if !c.calledStart() || c.c.Process == nil {
 			continue // not started
 		}
 		if pgid, err := syscall.Getpgid(c.c.Process.Pid); err != nil || pgid != os.Getpid() {
@@ -926,15 +471,15 @@ func (sh *Shell) cleanup() {
 	// doesn't work, use SIGKILL.
 	// https://golang.org/pkg/os/#Process.Signal
 	anyRunning := sh.forEachRunningCmd(func(c *Cmd) {
-		if err := c.process().Signal(os.Interrupt); err != nil {
-			sh.warningf("%d.Signal(SIGINT) failed: %v", c.process().Pid, err)
+		if err := c.c.Process.Signal(os.Interrupt); err != nil {
+			sh.warningf("%d.Signal(SIGINT) failed: %v", c.c.Process.Pid, err)
 		}
 	})
 	// If any child is still running, wait for 50ms.
 	if anyRunning {
 		time.Sleep(50 * time.Millisecond)
 		anyRunning = sh.forEachRunningCmd(func(c *Cmd) {
-			sh.warningf("%s (PID %d) did not die", c.c.Path, c.process().Pid)
+			sh.warningf("%s (PID %d) did not die", c.c.Path, c.c.Process.Pid)
 		})
 	}
 	// If any child is still running, wait for another second, then send SIGKILL
@@ -943,8 +488,8 @@ func (sh *Shell) cleanup() {
 		time.Sleep(time.Second)
 		sh.warningf("sending SIGKILL to all remaining child processes")
 		sh.forEachRunningCmd(func(c *Cmd) {
-			if err := c.process().Kill(); err != nil {
-				sh.warningf("%d.Kill() failed: %v", c.process().Pid, err)
+			if err := c.c.Process.Kill(); err != nil {
+				sh.warningf("%d.Kill() failed: %v", c.c.Process.Pid, err)
 			}
 		})
 	}
@@ -970,7 +515,7 @@ func (sh *Shell) cleanup() {
 	}
 }
 
-////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////
 // Public utilities
 
 var calledMaybeRunFnAndExit = false
@@ -996,42 +541,9 @@ func MaybeRunFnAndExit() {
 	}
 }
 
-// Run calls MaybeRunFnAndExit(), then returns m.Run(). Exported so that
-// TestMain functions can simply call os.Exit(gosh.Run(m)).
-func Run(m *testing.M) int {
+// Run calls MaybeRunFnAndExit(), then returns run(). Exported so that TestMain
+// functions can simply call os.Exit(gosh.Run(m.Run)).
+func Run(run func() int) int {
 	MaybeRunFnAndExit()
-	return m.Run()
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// invocation
-
-type invocation struct {
-	Name string
-	Args []interface{}
-}
-
-// encInvocation encodes an invocation.
-func encInvocation(name string, args ...interface{}) (string, error) {
-	inv := invocation{Name: name, Args: args}
-	buf := &bytes.Buffer{}
-	if err := gob.NewEncoder(buf).Encode(inv); err != nil {
-		return "", fmt.Errorf("failed to encode invocation: %v", err)
-	}
-	// Hex-encode the gob-encoded bytes so that the result can be used as an env
-	// var value.
-	return hex.EncodeToString(buf.Bytes()), nil
-}
-
-// decInvocation decodes an invocation.
-func decInvocation(s string) (name string, args []interface{}, err error) {
-	var inv invocation
-	b, err := hex.DecodeString(s)
-	if err == nil {
-		err = gob.NewDecoder(bytes.NewReader(b)).Decode(&inv)
-	}
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to decode invocation: %v", err)
-	}
-	return inv.Name, inv.Args, nil
+	return run()
 }

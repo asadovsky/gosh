@@ -4,7 +4,7 @@ package gosh_test
 // - variadic function registration and invocation
 // - shell cleanup
 // - Cmd.{Wait,Run,CombinedOutput}
-// - Shell.{AppendArgs,Wait,MakeTempFile,MakeTempDir}
+// - Shell.{Args,Wait,MakeTempFile,MakeTempDir}
 // - ShellOpts (including defaulting behavior)
 // - WatchParent
 
@@ -58,78 +58,86 @@ func neq(t *testing.T, got, notWant interface{}) {
 	}
 }
 
-func env(sh *gosh.Shell) string {
-	return strings.Join(sh.Env(), " ")
+func fatalOnError(t *testing.T) func(err error) {
+	return func(err error) {
+		fatal(t, err)
+	}
 }
 
-func TestEnv(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{T: t})
+// Mimics env_util.go sliceToMap.
+func vars(s string) map[string]string {
+	m := make(map[string]string)
+	if s == "" {
+		return m
+	}
+	for _, kv := range strings.Split(s, " ") {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			panic(kv)
+		}
+		m[parts[0]] = parts[1]
+	}
+	return m
+}
+
+func TestVars(t *testing.T) {
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
 	defer sh.Cleanup()
 	eq(t, sh.Get("FOO"), "")
-	eq(t, env(sh), "")
+	eq(t, sh.Vars, vars(""))
 	sh.Set("FOO", "1")
 	eq(t, sh.Get("FOO"), "1")
-	eq(t, sh.Get("BAR"), "") // not in env
-	eq(t, env(sh), "FOO=1")
+	eq(t, sh.Get("BAR"), "")
+	eq(t, sh.Vars, vars("FOO=1"))
 	sh.Set("BAR", "2")
 	eq(t, sh.Get("FOO"), "1")
 	eq(t, sh.Get("BAR"), "2")
-	eq(t, env(sh), "BAR=2 FOO=1")
+	eq(t, sh.Vars, vars("BAR=2 FOO=1"))
 	sh.SetMany("FOO=0")
-	eq(t, env(sh), "BAR=2 FOO=0")
+	eq(t, sh.Vars, vars("BAR=2 FOO=0"))
 	sh.SetMany("FOO=3", "BAR=4", "BAZ=5")
-	eq(t, env(sh), "BAR=4 BAZ=5 FOO=3")
-	sh.SetMany("FOO=", "BAR=6", "BAZ=") // unset FOO and BAZ
-	eq(t, env(sh), "BAR=6")
+	eq(t, sh.Vars, vars("BAR=4 BAZ=5 FOO=3"))
+	sh.SetMany("FOO=", "BAR=6", "BAZ=")
+	eq(t, sh.Vars, vars("BAR=6"))
 	sh.Unset("FOO")
-	eq(t, env(sh), "BAR=6")
+	eq(t, sh.Vars, vars("BAR=6"))
 	sh.Unset("BAR")
-	eq(t, env(sh), "")
-}
-
-func TestEnvSort(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{T: t})
-	defer sh.Cleanup()
-	sh.Set("FOO4", "4")
-	sh.Set("FOO", "bar")
-	sh.Set("FOOD", "D")
-	eq(t, env(sh), "FOO=bar FOO4=4 FOOD=D")
+	eq(t, sh.Vars, vars(""))
 }
 
 func TestPushdPopd(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{T: t, NoDieOnErr: true})
-	ok(t, sh.Err())
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
 	defer sh.Cleanup()
 	startDir, err := os.Getwd()
 	ok(t, err)
 	parentDir := filepath.Dir(startDir)
 	neq(t, startDir, parentDir)
 	sh.Pushd(parentDir)
-	ok(t, sh.Err())
 	cwd, err := os.Getwd()
 	ok(t, err)
 	eq(t, cwd, parentDir)
 	sh.Pushd(startDir)
-	ok(t, sh.Err())
 	cwd, err = os.Getwd()
 	ok(t, err)
 	eq(t, cwd, startDir)
 	sh.Popd()
-	ok(t, sh.Err())
 	cwd, err = os.Getwd()
 	ok(t, err)
 	eq(t, cwd, parentDir)
 	sh.Popd()
-	ok(t, sh.Err())
 	cwd, err = os.Getwd()
 	ok(t, err)
 	eq(t, cwd, startDir)
+	// The next sh.Popd() will fail.
+	var gotErr error
+	sh.Opts.OnError = func(err error) { gotErr = err }
 	sh.Popd()
-	nok(t, sh.Err())
+	nok(t, sh.Err)
+	eq(t, gotErr, sh.Err)
 }
 
 func TestCmds(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{T: t})
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
 	defer sh.Cleanup()
 
 	// Start server.
@@ -153,7 +161,7 @@ var (
 )
 
 func TestFns(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{T: t})
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
 	defer sh.Cleanup()
 
 	// Start server.
@@ -170,7 +178,7 @@ func TestFns(t *testing.T) {
 }
 
 func TestShellMain(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{T: t})
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
 	defer sh.Cleanup()
 	stdout, _ := sh.Main(lib.HelloWorldMain).Output()
 	eq(t, string(stdout), "Hello, world!\n")
@@ -196,7 +204,7 @@ func toString(r io.Reader) string {
 }
 
 func TestStdoutStderr(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{T: t})
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
 	defer sh.Cleanup()
 	s := "TestStdoutStderr\n"
 
@@ -222,7 +230,7 @@ var sleep = gosh.Register("sleep", func(d time.Duration) {
 })
 
 func TestShutdown(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{T: t})
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
 	defer sh.Cleanup()
 
 	for _, d := range []time.Duration{0, time.Second} {
@@ -237,5 +245,5 @@ func TestShutdown(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
-	os.Exit(gosh.Run(m))
+	os.Exit(gosh.Run(m.Run))
 }
