@@ -50,10 +50,10 @@ type Shell struct {
 type ShellOpts struct {
 	// OnError is called whenever an error is encountered.
 	// If not specified, defaults to panic(err).
-	OnError func(err error)
+	OnError func(error)
 	// OnLog is called to log things.
 	// If not specified, defaults to log.Println(args...).
-	OnLog func(args ...interface{})
+	OnLog func(...interface{})
 	// Child stdout and stderr are propagated up to the parent's stdout and stderr
 	// iff SuppressChildOutput is false.
 	SuppressChildOutput bool

@@ -58,9 +58,16 @@ func neq(t *testing.T, got, notWant interface{}) {
 	}
 }
 
-func fatalOnError(t *testing.T) func(err error) {
+func makeOnError(t *testing.T) func(error) {
 	return func(err error) {
-		fatal(t, err)
+		debug.PrintStack()
+		t.Fatal(err)
+	}
+}
+
+func makeOnLog(t *testing.T) func(...interface{}) {
+	return func(args ...interface{}) {
+		t.Log(args...)
 	}
 }
 
@@ -81,7 +88,7 @@ func vars(s string) map[string]string {
 }
 
 func TestVars(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: makeOnError(t), OnLog: makeOnLog(t)})
 	defer sh.Cleanup()
 	eq(t, sh.Get("FOO"), "")
 	eq(t, sh.Vars, vars(""))
@@ -106,7 +113,7 @@ func TestVars(t *testing.T) {
 }
 
 func TestPushdPopd(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: makeOnError(t), OnLog: makeOnLog(t)})
 	defer sh.Cleanup()
 	startDir, err := os.Getwd()
 	ok(t, err)
@@ -137,7 +144,7 @@ func TestPushdPopd(t *testing.T) {
 }
 
 func TestCmds(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: makeOnError(t), OnLog: makeOnLog(t)})
 	defer sh.Cleanup()
 
 	// Start server.
@@ -161,7 +168,7 @@ var (
 )
 
 func TestFns(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: makeOnError(t), OnLog: makeOnLog(t)})
 	defer sh.Cleanup()
 
 	// Start server.
@@ -178,7 +185,7 @@ func TestFns(t *testing.T) {
 }
 
 func TestShellMain(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: makeOnError(t), OnLog: makeOnLog(t)})
 	defer sh.Cleanup()
 	stdout, _ := sh.Main(lib.HelloWorldMain).Output()
 	eq(t, string(stdout), "Hello, world!\n")
@@ -204,7 +211,7 @@ func toString(r io.Reader) string {
 }
 
 func TestStdoutStderr(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: makeOnError(t), OnLog: makeOnLog(t)})
 	defer sh.Cleanup()
 	s := "TestStdoutStderr\n"
 
@@ -230,7 +237,7 @@ var sleep = gosh.Register("sleep", func(d time.Duration) {
 })
 
 func TestShutdown(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{OnError: fatalOnError(t)})
+	sh := gosh.NewShell(gosh.ShellOpts{OnError: makeOnError(t), OnLog: makeOnLog(t)})
 	defer sh.Cleanup()
 
 	for _, d := range []time.Duration{0, time.Second} {
