@@ -227,7 +227,7 @@ func newShell(opts ShellOpts) (*Shell, error) {
 	}
 	// Call sh.cleanup() if needed when a termination signal is received.
 	onTerminationSignal(func(sig os.Signal) {
-		sh.logf("Received signal: %v", sig)
+		sh.logf("Received signal: %v\n", sig)
 		sh.cleanupMu.Lock()
 		if !sh.calledCleanup {
 			sh.calledCleanup = true
@@ -332,7 +332,7 @@ func (sh *Shell) wait() error {
 			continue
 		}
 		if err := c.wait(); err != nil {
-			sh.logf("Cmd.Wait() failed: %v", err)
+			sh.logf("Cmd.Wait() failed: %v\n", err)
 			if res == nil {
 				res = err
 			}
@@ -437,14 +437,14 @@ func (sh *Shell) terminateRunningCmds() {
 	// Try SIGINT first; if that doesn't work, use SIGKILL.
 	anyRunning := sh.forEachRunningCmd(func(c *Cmd) {
 		if err := c.c.Process.Signal(os.Interrupt); err != nil {
-			sh.logf("%d.Signal(os.Interrupt) failed: %v", c.c.Process.Pid, err)
+			sh.logf("%d.Signal(os.Interrupt) failed: %v\n", c.c.Process.Pid, err)
 		}
 	})
 	// If any child is still running, wait for 50ms.
 	if anyRunning {
 		time.Sleep(50 * time.Millisecond)
 		anyRunning = sh.forEachRunningCmd(func(c *Cmd) {
-			sh.logf("%s (PID %d) did not die", c.c.Path, c.c.Process.Pid)
+			sh.logf("%s (PID %d) did not die\n", c.c.Path, c.c.Process.Pid)
 		})
 	}
 	// If any child is still running, wait for another second, then send SIGKILL
@@ -453,10 +453,10 @@ func (sh *Shell) terminateRunningCmds() {
 		time.Sleep(time.Second)
 		sh.forEachRunningCmd(func(c *Cmd) {
 			if err := c.c.Process.Kill(); err != nil {
-				sh.logf("%d.Kill() failed: %v", c.c.Process.Pid, err)
+				sh.logf("%d.Kill() failed: %v\n", c.c.Process.Pid, err)
 			}
 		})
-		sh.logf("Sent SIGKILL to all remaining child processes")
+		sh.logf("Sent SIGKILL to all remaining child processes\n")
 	}
 }
 
@@ -465,7 +465,7 @@ func (sh *Shell) cleanup() {
 	// syscall.Setpgid().
 	pgid, pid := syscall.Getpgrp(), os.Getpid()
 	if pgid != pid {
-		sh.logf("PGID (%d) != PID (%d); skipping subprocess termination", pgid, pid)
+		sh.logf("PGID (%d) != PID (%d); skipping subprocess termination\n", pgid, pid)
 	} else {
 		sh.terminateRunningCmds()
 	}
@@ -473,16 +473,16 @@ func (sh *Shell) cleanup() {
 	for _, tempFile := range sh.tempFiles {
 		name := tempFile.Name()
 		if err := tempFile.Close(); err != nil {
-			sh.logf("%q.Close() failed: %v", name, err)
+			sh.logf("%q.Close() failed: %v\n", name, err)
 		}
 		if err := os.RemoveAll(name); err != nil {
-			sh.logf("os.RemoveAll(%q) failed: %v", name, err)
+			sh.logf("os.RemoveAll(%q) failed: %v\n", name, err)
 		}
 	}
 	// Delete all temporary directories.
 	for _, tempDir := range sh.tempDirs {
 		if err := os.RemoveAll(tempDir); err != nil {
-			sh.logf("os.RemoveAll(%q) failed: %v", tempDir, err)
+			sh.logf("os.RemoveAll(%q) failed: %v\n", tempDir, err)
 		}
 	}
 	// Call any registered cleanup functions in LIFO order.
