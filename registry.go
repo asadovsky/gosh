@@ -23,8 +23,8 @@ var (
 
 // Register registers the given function.
 func Register(name string, i interface{}) *Fn {
-	// TODO: Switch to using len(fns) as name, and maybe drop the name argument,
-	// if it turns out that initialization order is deterministic.
+	// TODO(sadovsky): Switch to using len(fns) as name, and maybe drop the name
+	// argument, if it turns out that initialization order is deterministic.
 	if _, ok := fns[name]; ok {
 		panic(fmt.Errorf("already registered: %s", name))
 	}

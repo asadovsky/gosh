@@ -1,12 +1,5 @@
 package gosh
 
-// This file implements a pipe backed by an unbounded in-memory buffer. Writes
-// on the pipe never block; reads on the pipe block until data is available.
-//
-// References:
-// https://groups.google.com/d/topic/golang-dev/k0bSal8eDyE/discussion
-// https://github.com/golang/net/blob/master/http2/pipe.go
-
 import (
 	"bytes"
 	"errors"
@@ -20,7 +13,9 @@ type bufferedPipe struct {
 	err  error
 }
 
-// NewBufferedPipe returns a new buffered pipe.
+// NewBufferedPipe returns a new pipe backed by an unbounded in-memory buffer.
+// Writes on the pipe never block; reads on the pipe block until data is
+// available.
 func NewBufferedPipe() io.ReadWriteCloser {
 	return &bufferedPipe{cond: sync.NewCond(&sync.Mutex{})}
 }

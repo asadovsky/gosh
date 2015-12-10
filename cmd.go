@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,12 +22,17 @@ var (
 // Cmd represents a command. Not thread-safe.
 // Opts, Vars, and Args should not be modified after calling Start.
 type Cmd struct {
-	// Opts is the CmdOpts for this Cmd.
-	Opts CmdOpts
 	// Vars is the map of env vars for this Cmd.
 	Vars map[string]string
 	// Args is the list of args for this Cmd.
 	Args []string
+	// SuppressOutput is inherited from Shell.Opts.SuppressChildOutput.
+	SuppressOutput bool
+	// OutputDir is inherited from Shell.Opts.ChildOutputDir.
+	OutputDir string
+	// Stdin specifies this Cmd's stdin. See comments in exec.Cmd for detailed
+	// semantics.
+	Stdin io.Reader
 	// Internal state.
 	sh             *Shell
 	c              *exec.Cmd
@@ -38,15 +42,9 @@ type Cmd struct {
 	stderrWriters  []io.Writer
 	closeAfterWait []io.Closer
 	condReady      *sync.Cond
-	ready          bool // protected by condReady.L
+	recvReady      bool // protected by condReady.L
 	condVars       *sync.Cond
-	vars           map[string]string // protected by condVars.L
-}
-
-// CmdOpts configures Cmd. See ShellOpts for field descriptions.
-type CmdOpts struct {
-	SuppressOutput bool
-	OutputDir      string
+	recvVars       map[string]string // protected by condVars.L
 }
 
 // Stdout returns a Reader backed by a buffered pipe for this command's stdout.
@@ -97,8 +95,8 @@ func (c *Cmd) Wait() {
 	c.sh.SetErr(c.wait())
 }
 
-// TODO: Maybe add a method to send SIGINT, wait for a bit, then send SIGKILL if
-// the process hasn't exited.
+// TODO(sadovsky): Maybe add a method to send SIGINT, wait for a bit, then send
+// SIGKILL if the process hasn't exited.
 
 // Shutdown sends the given signal to this command, then waits for it to exit.
 func (c *Cmd) Shutdown(sig os.Signal) {
@@ -141,7 +139,7 @@ func (c *Cmd) Process() *os.Process {
 ////////////////////////////////////////
 // Internals
 
-func newCmd(sh *Shell, opts CmdOpts, vars map[string]string, name string, args ...string) (*Cmd, error) {
+func newCmd(sh *Shell, vars map[string]string, name string, args ...string) (*Cmd, error) {
 	// Mimics https://golang.org/src/os/exec/exec.go Command.
 	if filepath.Base(name) == name {
 		if lp, err := exec.LookPath(name); err != nil {
@@ -151,17 +149,13 @@ func newCmd(sh *Shell, opts CmdOpts, vars map[string]string, name string, args .
 		}
 	}
 	c := &Cmd{
-		Opts:           opts,
-		Vars:           vars,
-		Args:           args,
-		sh:             sh,
-		name:           name,
-		stdoutWriters:  []io.Writer{},
-		stderrWriters:  []io.Writer{},
-		closeAfterWait: []io.Closer{},
-		condReady:      sync.NewCond(&sync.Mutex{}),
-		condVars:       sync.NewCond(&sync.Mutex{}),
-		vars:           map[string]string{},
+		Vars:      vars,
+		Args:      args,
+		sh:        sh,
+		name:      name,
+		condReady: sync.NewCond(&sync.Mutex{}),
+		condVars:  sync.NewCond(&sync.Mutex{}),
+		recvVars:  map[string]string{},
 	}
 	sh.cmds = append(sh.cmds, c)
 	return c, nil
@@ -200,12 +194,12 @@ func (w *recvWriter) Write(p []byte) (n int, err error) {
 				switch m.Type {
 				case typeReady:
 					w.c.condReady.L.Lock()
-					w.c.ready = true
+					w.c.recvReady = true
 					w.c.condReady.Signal()
 					w.c.condReady.L.Unlock()
 				case typeVars:
 					w.c.condVars.L.Lock()
-					w.c.vars = mergeMaps(w.c.vars, m.Vars)
+					w.c.recvVars = mergeMaps(w.c.recvVars, m.Vars)
 					w.c.condVars.Signal()
 					w.c.condVars.L.Unlock()
 				default:
@@ -236,21 +230,21 @@ func (c *Cmd) initMultiWriter(f *os.File, t string) (io.Writer, error) {
 	} else {
 		writers = &c.stderrWriters
 	}
-	if !c.Opts.SuppressOutput {
+	if !c.SuppressOutput {
 		addWriter(writers, f)
 	}
-	if c.Opts.OutputDir != "" {
+	if c.OutputDir != "" {
 		suffix := "stderr"
 		if f == os.Stdout {
 			suffix = "stdout"
 		}
-		name := filepath.Join(c.Opts.OutputDir, filepath.Base(c.name)+"."+t+"."+suffix)
-		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		name := filepath.Join(c.OutputDir, filepath.Base(c.name)+"."+t+"."+suffix)
+		file, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
 			return nil, err
 		}
-		addWriter(writers, f)
-		c.closeAfterWait = append(c.closeAfterWait, f)
+		addWriter(writers, file)
+		c.closeAfterWait = append(c.closeAfterWait, file)
 	}
 	if f == os.Stdout {
 		addWriter(writers, &recvWriter{c: c})
@@ -284,10 +278,7 @@ func (c *Cmd) start() error {
 	}
 	c.c = exec.Command(c.name, c.Args...)
 	c.c.Env = mapToSlice(c.Vars)
-	if c.c.Stdout != nil || c.c.Stderr != nil { // invariant check
-		log.Fatal(c.c.Stdout, c.c.Stderr)
-	}
-	// Set up stdout and stderr.
+	c.c.Stdin = c.Stdin
 	t := time.Now().UTC().Format("20060102.150405.000000")
 	var err error
 	if c.c.Stdout, err = c.initMultiWriter(os.Stdout, t); err != nil {
@@ -296,8 +287,8 @@ func (c *Cmd) start() error {
 	if c.c.Stderr, err = c.initMultiWriter(os.Stderr, t); err != nil {
 		return err
 	}
-	// TODO: Maybe wrap every child process with a "supervisor" process that calls
-	// WatchParent().
+	// TODO(sadovsky): Maybe wrap every child process with a "supervisor" process
+	// that calls WatchParent().
 	err = c.c.Start()
 	if err != nil {
 		closeAll(c.closeAfterWait)
@@ -305,7 +296,7 @@ func (c *Cmd) start() error {
 	return err
 }
 
-// TODO: Add timeouts for Cmd.{awaitReady,awaitVars,wait}.
+// TODO(sadovsky): Add timeouts for Cmd.{awaitReady,awaitVars,wait}.
 
 func (c *Cmd) awaitReady() error {
 	if !c.calledStart() {
@@ -315,7 +306,7 @@ func (c *Cmd) awaitReady() error {
 	}
 	// http://golang.org/pkg/sync/#Cond.Wait
 	c.condReady.L.Lock()
-	for !c.ready {
+	for !c.recvReady {
 		c.condReady.Wait()
 	}
 	c.condReady.L.Unlock()
@@ -334,7 +325,7 @@ func (c *Cmd) awaitVars(keys ...string) (map[string]string, error) {
 	}
 	res := map[string]string{}
 	updateRes := func() {
-		for k, v := range c.vars {
+		for k, v := range c.recvVars {
 			if _, ok := wantKeys[k]; ok {
 				res[k] = v
 			}
