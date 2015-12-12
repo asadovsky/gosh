@@ -1,14 +1,19 @@
+// Copyright 2015 The Vanadium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package gosh_test
 
 // TODO(sadovsky): Add more tests:
 // - variadic function registration and invocation
 // - shell cleanup
 // - Cmd.{Wait,Run}
-// - Shell.{Args,Wait,MakeTempFile,MakeTempDir}
-// - ShellOpts (including defaulting behavior)
-// - WatchParent
+// - Shell.{Args,Wait,Rename,MakeTempFile,MakeTempDir}
+// - Opts (including defaulting behavior)
+// - {,Maybe}WatchParent
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -20,8 +25,10 @@ import (
 	"time"
 
 	"github.com/asadovsky/gosh"
-	"github.com/asadovsky/gosh/example/lib"
+	"github.com/asadovsky/gosh/internal/gosh_example_lib"
 )
+
+var fakeError = errors.New("fake error")
 
 func fatal(t *testing.T, v ...interface{}) {
 	debug.PrintStack()
@@ -65,7 +72,7 @@ func makeErrorf(t *testing.T) func(string, ...interface{}) {
 }
 
 func TestPushdPopd(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{Errorf: makeErrorf(t), Logf: t.Logf})
+	sh := gosh.NewShell(gosh.Opts{Errorf: makeErrorf(t), Logf: t.Logf})
 	defer sh.Cleanup()
 	startDir, err := os.Getwd()
 	ok(t, err)
@@ -91,16 +98,17 @@ func TestPushdPopd(t *testing.T) {
 	var calledErrorf bool
 	sh.Opts.Errorf = func(string, ...interface{}) { calledErrorf = true }
 	sh.Popd()
+	// Note, our deferred sh.Cleanup() should succeed despite this error.
 	nok(t, sh.Err)
 	eq(t, calledErrorf, true)
 }
 
 func TestCmds(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{Errorf: makeErrorf(t), Logf: t.Logf})
+	sh := gosh.NewShell(gosh.Opts{Errorf: makeErrorf(t), Logf: t.Logf})
 	defer sh.Cleanup()
 
 	// Start server.
-	binPath := sh.BuildGoPkg("github.com/asadovsky/gosh/example/server")
+	binPath := sh.BuildGoPkg("github.com/asadovsky/gosh/internal/gosh_example_server")
 	c := sh.Cmd(binPath)
 	c.Start()
 	c.AwaitReady()
@@ -108,7 +116,7 @@ func TestCmds(t *testing.T) {
 	neq(t, addr, "")
 
 	// Run client.
-	binPath = sh.BuildGoPkg("github.com/asadovsky/gosh/example/client")
+	binPath = sh.BuildGoPkg("github.com/asadovsky/gosh/internal/gosh_example_client")
 	c = sh.Cmd(binPath, "-addr="+addr)
 	stdout, _ := c.Output()
 	eq(t, string(stdout), "Hello, world!\n")
@@ -120,7 +128,7 @@ var (
 )
 
 func TestFns(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{Errorf: makeErrorf(t), Logf: t.Logf})
+	sh := gosh.NewShell(gosh.Opts{Errorf: makeErrorf(t), Logf: t.Logf})
 	defer sh.Cleanup()
 
 	// Start server.
@@ -137,21 +145,38 @@ func TestFns(t *testing.T) {
 }
 
 func TestShellMain(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{Errorf: makeErrorf(t), Logf: t.Logf})
+	sh := gosh.NewShell(gosh.Opts{Errorf: makeErrorf(t), Logf: t.Logf})
 	defer sh.Cleanup()
 	stdout, _ := sh.Main(lib.HelloWorldMain).Output()
 	eq(t, string(stdout), "Hello, world!\n")
 }
 
-var write = gosh.Register("write", func(s string, stdout bool) error {
-	var f *os.File
+var write = gosh.Register("write", func(stdout, stderr bool) error {
 	if stdout {
-		f = os.Stdout
-	} else {
-		f = os.Stderr
+		time.Sleep(time.Millisecond)
+		if _, err := os.Stdout.Write([]byte("A")); err != nil {
+			return err
+		}
 	}
-	_, err := f.Write([]byte(s))
-	return err
+	if stderr {
+		time.Sleep(time.Millisecond)
+		if _, err := os.Stderr.Write([]byte("B")); err != nil {
+			return err
+		}
+	}
+	if stdout {
+		time.Sleep(time.Millisecond)
+		if _, err := os.Stdout.Write([]byte("A")); err != nil {
+			return err
+		}
+	}
+	if stderr {
+		time.Sleep(time.Millisecond)
+		if _, err := os.Stderr.Write([]byte("B")); err != nil {
+			return err
+		}
+	}
+	return nil
 })
 
 func toString(r io.Reader) string {
@@ -163,25 +188,38 @@ func toString(r io.Reader) string {
 }
 
 func TestStdoutStderr(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{Errorf: makeErrorf(t), Logf: t.Logf})
+	sh := gosh.NewShell(gosh.Opts{Errorf: makeErrorf(t), Logf: t.Logf})
 	defer sh.Cleanup()
-	s := "TestStdoutStderr\n"
 
-	// Write to stdout.
-	c := sh.Fn(write, s, true)
-	stdout, stderr := c.Stdout(), c.Stderr()
-	output := string(c.CombinedOutput())
-	eq(t, output, s)
-	eq(t, toString(stdout), s)
-	eq(t, toString(stderr), "")
+	// Write to stdout only.
+	c := sh.Fn(write, true, false)
+	stdoutPipe, stderrPipe := c.StdoutPipe(), c.StderrPipe()
+	eq(t, string(c.CombinedOutput()), "AA")
+	eq(t, toString(stdoutPipe), "AA")
+	eq(t, toString(stderrPipe), "")
+	stdout, stderr := sh.Fn(write, true, false).Output()
+	eq(t, string(stdout), "AA")
+	eq(t, string(stderr), "")
 
-	// Write to stderr.
-	c = sh.Fn(write, s, false)
-	stdout, stderr = c.Stdout(), c.Stderr()
-	output = string(c.CombinedOutput())
-	eq(t, output, s)
-	eq(t, toString(stdout), "")
-	eq(t, toString(stderr), s)
+	// Write to stderr only.
+	c = sh.Fn(write, false, true)
+	stdoutPipe, stderrPipe = c.StdoutPipe(), c.StderrPipe()
+	eq(t, string(c.CombinedOutput()), "BB")
+	eq(t, toString(stdoutPipe), "")
+	eq(t, toString(stderrPipe), "BB")
+	stdout, stderr = sh.Fn(write, false, true).Output()
+	eq(t, string(stdout), "")
+	eq(t, string(stderr), "BB")
+
+	// Write to both stdout and stderr.
+	c = sh.Fn(write, true, true)
+	stdoutPipe, stderrPipe = c.StdoutPipe(), c.StderrPipe()
+	eq(t, string(c.CombinedOutput()), "ABAB")
+	eq(t, toString(stdoutPipe), "AA")
+	eq(t, toString(stderrPipe), "BB")
+	stdout, stderr = sh.Fn(write, true, true).Output()
+	eq(t, string(stdout), "AA")
+	eq(t, string(stderr), "BB")
 }
 
 var sleep = gosh.Register("sleep", func(d time.Duration) {
@@ -189,7 +227,7 @@ var sleep = gosh.Register("sleep", func(d time.Duration) {
 })
 
 func TestShutdown(t *testing.T) {
-	sh := gosh.NewShell(gosh.ShellOpts{Errorf: makeErrorf(t), Logf: t.Logf})
+	sh := gosh.NewShell(gosh.Opts{Errorf: makeErrorf(t), Logf: t.Logf})
 	defer sh.Cleanup()
 
 	for _, d := range []time.Duration{0, time.Second} {
@@ -201,6 +239,72 @@ func TestShutdown(t *testing.T) {
 			c.Shutdown(s)
 		}
 	}
+}
+
+// Tests that sh.Ok panics under various conditions.
+func TestOkPanics(t *testing.T) {
+	func() { // errDidNotCallNewShell
+		sh := gosh.Shell{}
+		defer func() { neq(t, recover(), nil) }()
+		sh.Ok()
+	}()
+	func() { // errShellErrIsNotNil
+		sh := gosh.NewShell(gosh.Opts{Errorf: t.Logf})
+		defer sh.Cleanup()
+		sh.Err = fakeError
+		defer func() { neq(t, recover(), nil) }()
+		sh.Ok()
+	}()
+	func() { // errAlreadyCalledCleanup
+		sh := gosh.NewShell(gosh.Opts{Errorf: t.Logf})
+		sh.Cleanup()
+		defer func() { neq(t, recover(), nil) }()
+		sh.Ok()
+	}()
+}
+
+// Tests that sh.HandleError panics under various conditions.
+func TestHandleErrorPanics(t *testing.T) {
+	func() { // errDidNotCallNewShell
+		sh := gosh.Shell{}
+		defer func() { neq(t, recover(), nil) }()
+		sh.HandleError(fakeError)
+	}()
+	func() { // errShellErrIsNotNil
+		sh := gosh.NewShell(gosh.Opts{Errorf: t.Logf})
+		defer sh.Cleanup()
+		sh.Err = fakeError
+		defer func() { neq(t, recover(), nil) }()
+		sh.HandleError(fakeError)
+	}()
+	func() { // errAlreadyCalledCleanup
+		sh := gosh.NewShell(gosh.Opts{Errorf: t.Logf})
+		sh.Cleanup()
+		defer func() { neq(t, recover(), nil) }()
+		sh.HandleError(fakeError)
+	}()
+}
+
+// Tests that sh.Cleanup succeeds even if sh.Err is not nil.
+func TestCleanupAfterError(t *testing.T) {
+	sh := gosh.NewShell(gosh.Opts{Errorf: t.Logf})
+	sh.Err = fakeError
+	sh.Cleanup()
+}
+
+// Tests that sh.Cleanup panics under various conditions.
+func TestCleanupPanics(t *testing.T) {
+	func() { // errDidNotCallNewShell
+		sh := gosh.Shell{}
+		defer func() { neq(t, recover(), nil) }()
+		sh.Cleanup()
+	}()
+	func() { // errAlreadyCalledCleanup
+		sh := gosh.NewShell(gosh.Opts{Errorf: t.Logf})
+		sh.Cleanup()
+		defer func() { neq(t, recover(), nil) }()
+		sh.Cleanup()
+	}()
 }
 
 func TestMain(m *testing.M) {

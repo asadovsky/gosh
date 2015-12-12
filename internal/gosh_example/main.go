@@ -1,18 +1,22 @@
+// Copyright 2015 The Vanadium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package main
 
 import (
 	"fmt"
 
 	"github.com/asadovsky/gosh"
-	"github.com/asadovsky/gosh/example/lib"
+	"github.com/asadovsky/gosh/internal/gosh_example_lib"
 )
 
 func ExampleCmds() {
-	sh := gosh.NewShell(gosh.ShellOpts{SuppressChildOutput: true})
+	sh := gosh.NewShell(gosh.Opts{SuppressChildOutput: true})
 	defer sh.Cleanup()
 
 	// Start server.
-	binPath := sh.BuildGoPkg("github.com/asadovsky/gosh/example/server")
+	binPath := sh.BuildGoPkg("github.com/asadovsky/gosh/internal/gosh_example_server")
 	c := sh.Cmd(binPath)
 	c.Start()
 	c.AwaitReady()
@@ -20,7 +24,7 @@ func ExampleCmds() {
 	fmt.Println(addr)
 
 	// Run client.
-	binPath = sh.BuildGoPkg("github.com/asadovsky/gosh/example/client")
+	binPath = sh.BuildGoPkg("github.com/asadovsky/gosh/internal/gosh_example_client")
 	c = sh.Cmd(binPath, "-addr="+addr)
 	stdout, _ := c.Output()
 	fmt.Print(string(stdout))
@@ -32,7 +36,7 @@ var (
 )
 
 func ExampleFns() {
-	sh := gosh.NewShell(gosh.ShellOpts{SuppressChildOutput: true})
+	sh := gosh.NewShell(gosh.Opts{SuppressChildOutput: true})
 	defer sh.Cleanup()
 
 	// Start server.
@@ -49,7 +53,7 @@ func ExampleFns() {
 }
 
 func ExampleShellMain() {
-	sh := gosh.NewShell(gosh.ShellOpts{})
+	sh := gosh.NewShell(gosh.Opts{})
 	defer sh.Cleanup()
 	stdout, _ := sh.Main(lib.HelloWorldMain).Output()
 	fmt.Print(string(stdout))

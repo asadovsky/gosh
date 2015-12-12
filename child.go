@@ -1,3 +1,7 @@
+// Copyright 2015 The Vanadium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package gosh
 
 // This file contains functions meant to be called from a child process.
@@ -51,4 +55,15 @@ func WatchParent() {
 			time.Sleep(time.Second)
 		}
 	}()
+}
+
+// MaybeWatchParent calls WatchParent iff this process was spawned by a
+// gosh.Shell in the parent process.
+func MaybeWatchParent() {
+	if os.Getenv(envSpawnedByShell) != "" {
+		// Our child processes should see envSpawnedByShell iff they were spawned by
+		// a gosh.Shell in this process.
+		os.Unsetenv(envSpawnedByShell)
+		WatchParent()
+	}
 }

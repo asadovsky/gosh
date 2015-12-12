@@ -1,3 +1,7 @@
+// Copyright 2015 The Vanadium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package gosh
 
 import (
@@ -14,13 +18,13 @@ import (
 )
 
 var (
-	errAlreadyCalledStart = errors.New("already called start")
-	errAlreadyCalledWait  = errors.New("already called wait")
-	errNotStarted         = errors.New("not started")
+	errAlreadyCalledStart = errors.New("gosh: already called Cmd.Start")
+	errAlreadyCalledWait  = errors.New("gosh: already called Cmd.Wait")
+	errDidNotCallStart    = errors.New("gosh: did not call Cmd.Start")
 )
 
 // Cmd represents a command. Not thread-safe.
-// Opts, Vars, and Args should not be modified after calling Start.
+// Public fields should not be modified after calling Start.
 type Cmd struct {
 	// Vars is the map of env vars for this Cmd.
 	Vars map[string]string
@@ -47,52 +51,52 @@ type Cmd struct {
 	recvVars       map[string]string // protected by condVars.L
 }
 
-// Stdout returns a Reader backed by a buffered pipe for this command's stdout.
-// Must be called before Start. May be called more than once; each invocation
-// creates a new pipe.
-func (c *Cmd) Stdout() io.Reader {
-	c.sh.ok()
-	res, err := c.stdout()
-	c.sh.SetErr(err)
+// StdoutPipe returns a Reader backed by a buffered pipe for this command's
+// stdout. Must be called before Start. May be called more than once; each
+// invocation creates a new pipe.
+func (c *Cmd) StdoutPipe() io.Reader {
+	c.sh.Ok()
+	res, err := c.stdoutPipe()
+	c.sh.HandleError(err)
 	return res
 }
 
-// Stderr returns a Reader backed by a buffered pipe for this command's stderr.
-// Must be called before Start. May be called more than once; each invocation
-// creates a new pipe.
-func (c *Cmd) Stderr() io.Reader {
-	c.sh.ok()
-	res, err := c.stderr()
-	c.sh.SetErr(err)
+// StderrPipe returns a Reader backed by a buffered pipe for this command's
+// stderr. Must be called before Start. May be called more than once; each
+// invocation creates a new pipe.
+func (c *Cmd) StderrPipe() io.Reader {
+	c.sh.Ok()
+	res, err := c.stderrPipe()
+	c.sh.HandleError(err)
 	return res
 }
 
 // Start starts this command.
 func (c *Cmd) Start() {
-	c.sh.ok()
-	c.sh.SetErr(c.start())
+	c.sh.Ok()
+	c.sh.HandleError(c.start())
 }
 
 // AwaitReady waits for the child process to call SendReady. Must not be called
 // before Start or after Wait.
 func (c *Cmd) AwaitReady() {
-	c.sh.ok()
-	c.sh.SetErr(c.awaitReady())
+	c.sh.Ok()
+	c.sh.HandleError(c.awaitReady())
 }
 
 // AwaitVars waits for the child process to send values for the given vars
 // (using SendVars). Must not be called before Start or after Wait.
 func (c *Cmd) AwaitVars(keys ...string) map[string]string {
-	c.sh.ok()
+	c.sh.Ok()
 	res, err := c.awaitVars(keys...)
-	c.sh.SetErr(err)
+	c.sh.HandleError(err)
 	return res
 }
 
 // Wait waits for this command to exit.
 func (c *Cmd) Wait() {
-	c.sh.ok()
-	c.sh.SetErr(c.wait())
+	c.sh.Ok()
+	c.sh.HandleError(c.wait())
 }
 
 // TODO(sadovsky): Maybe add a method to send SIGINT, wait for a bit, then send
@@ -100,39 +104,39 @@ func (c *Cmd) Wait() {
 
 // Shutdown sends the given signal to this command, then waits for it to exit.
 func (c *Cmd) Shutdown(sig os.Signal) {
-	c.sh.ok()
-	c.sh.SetErr(c.shutdown(sig))
+	c.sh.Ok()
+	c.sh.HandleError(c.shutdown(sig))
 }
 
 // Run calls Start followed by Wait.
 func (c *Cmd) Run() {
-	c.sh.ok()
-	c.sh.SetErr(c.run())
+	c.sh.Ok()
+	c.sh.HandleError(c.run())
 }
 
 // Output calls Start followed by Wait, then returns this command's stdout and
 // stderr.
 func (c *Cmd) Output() ([]byte, []byte) {
-	c.sh.ok()
+	c.sh.Ok()
 	stdout, stderr, err := c.output()
-	c.sh.SetErr(err)
+	c.sh.HandleError(err)
 	return stdout, stderr
 }
 
 // CombinedOutput calls Start followed by Wait, then returns this command's
 // combined stdout and stderr.
 func (c *Cmd) CombinedOutput() []byte {
-	c.sh.ok()
+	c.sh.Ok()
 	res, err := c.combinedOutput()
-	c.sh.SetErr(err)
+	c.sh.HandleError(err)
 	return res
 }
 
 // Process returns the underlying process handle for this command.
 func (c *Cmd) Process() *os.Process {
-	c.sh.ok()
+	c.sh.Ok()
 	res, err := c.process()
-	c.sh.SetErr(err)
+	c.sh.HandleError(err)
 	return res
 }
 
@@ -156,6 +160,12 @@ func newCmd(sh *Shell, vars map[string]string, name string, args ...string) (*Cm
 		condReady: sync.NewCond(&sync.Mutex{}),
 		condVars:  sync.NewCond(&sync.Mutex{}),
 		recvVars:  map[string]string{},
+	}
+	// Protect against concurrent signal-triggered Shell.cleanup().
+	sh.cleanupMu.Lock()
+	defer sh.cleanupMu.Unlock()
+	if sh.calledCleanup {
+		return nil, errAlreadyCalledCleanup
 	}
 	sh.cmds = append(sh.cmds, c)
 	return c, nil
@@ -252,7 +262,7 @@ func (c *Cmd) initMultiWriter(f *os.File, t string) (io.Writer, error) {
 	return io.MultiWriter(*writers...), nil
 }
 
-func (c *Cmd) stdout() (io.Reader, error) {
+func (c *Cmd) stdoutPipe() (io.Reader, error) {
 	if c.calledStart() {
 		return nil, errAlreadyCalledStart
 	}
@@ -262,7 +272,7 @@ func (c *Cmd) stdout() (io.Reader, error) {
 	return p, nil
 }
 
-func (c *Cmd) stderr() (io.Reader, error) {
+func (c *Cmd) stderrPipe() (io.Reader, error) {
 	if c.calledStart() {
 		return nil, errAlreadyCalledStart
 	}
@@ -275,6 +285,13 @@ func (c *Cmd) stderr() (io.Reader, error) {
 func (c *Cmd) start() error {
 	if c.calledStart() {
 		return errAlreadyCalledStart
+	}
+	// Protect against Cmd.start() writing to c.c.Process concurrently with
+	// signal-triggered Shell.cleanup() reading from it.
+	c.sh.cleanupMu.Lock()
+	defer c.sh.cleanupMu.Unlock()
+	if c.sh.calledCleanup {
+		return errAlreadyCalledCleanup
 	}
 	c.c = exec.Command(c.name, c.Args...)
 	c.c.Env = mapToSlice(c.Vars)
@@ -300,7 +317,7 @@ func (c *Cmd) start() error {
 
 func (c *Cmd) awaitReady() error {
 	if !c.calledStart() {
-		return errNotStarted
+		return errDidNotCallStart
 	} else if c.calledWait {
 		return errAlreadyCalledWait
 	}
@@ -315,7 +332,7 @@ func (c *Cmd) awaitReady() error {
 
 func (c *Cmd) awaitVars(keys ...string) (map[string]string, error) {
 	if !c.calledStart() {
-		return nil, errNotStarted
+		return nil, errDidNotCallStart
 	} else if c.calledWait {
 		return nil, errAlreadyCalledWait
 	}
@@ -344,7 +361,7 @@ func (c *Cmd) awaitVars(keys ...string) (map[string]string, error) {
 
 func (c *Cmd) wait() error {
 	if !c.calledStart() {
-		return errNotStarted
+		return errDidNotCallStart
 	} else if c.calledWait {
 		return errAlreadyCalledWait
 	}
@@ -356,7 +373,7 @@ func (c *Cmd) wait() error {
 
 func (c *Cmd) shutdown(sig os.Signal) error {
 	if !c.calledStart() {
-		return errNotStarted
+		return errDidNotCallStart
 	}
 	if err := c.c.Process.Signal(sig); err != nil {
 		return err
@@ -411,7 +428,7 @@ func (c *Cmd) combinedOutput() ([]byte, error) {
 
 func (c *Cmd) process() (*os.Process, error) {
 	if !c.calledStart() {
-		return nil, errNotStarted
+		return nil, errDidNotCallStart
 	}
 	return c.c.Process, nil
 }

@@ -1,21 +1,12 @@
 # Gosh
 
-Oh my gosh, no more shell scripts!
+Gosh is a Go package for running and managing processes.
 
 GoDoc: https://godoc.org/github.com/asadovsky/gosh
 
-Gosh is a Go library for running and managing processes: start them, wait for
-them to exit, capture their output streams, pipe messages between them,
-terminate them (e.g. on SIGINT), and so forth.
-
-Gosh is meant to be used in situations where you might otherwise be tempted to
-write a shell script. It is not a framework. It will not solve all your
-problems.
-
 ## Development
 
+    cp -rf $JIRI_ROOT/release/go/src/v.io/x/lib/gosh/ ./
+    cp $JIRI_ROOT/release/go/src/v.io/x/lib/LICENSE ./
+    find-replace "v.io/x/lib/gosh" "github.com/asadovsky/gosh"
     GOPATH=~/dev/go go test github.com/asadovsky/gosh/...
-    GOPATH=~/dev/go go vet github.com/asadovsky/gosh/...
-
-    GOPATH=~/dev/go go install github.com/asadovsky/gosh/...
-    GOPATH=~/dev/go ~/dev/go/bin/example

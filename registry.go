@@ -1,11 +1,15 @@
+// Copyright 2015 The Vanadium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package gosh
 
 // Inspired by https://github.com/golang/appengine/blob/master/delay/delay.go.
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/gob"
-	"encoding/hex"
 	"fmt"
 	"reflect"
 )
@@ -21,20 +25,22 @@ var (
 	errorType = reflect.TypeOf((*error)(nil)).Elem()
 )
 
-// Register registers the given function.
-func Register(name string, i interface{}) *Fn {
+// Register registers the given function with the given name. 'name' must be
+// unique across the dependency graph; 'fni' must be a function that accepts
+// gob-encodable arguments and returns an error or nothing.
+func Register(name string, fni interface{}) *Fn {
 	// TODO(sadovsky): Switch to using len(fns) as name, and maybe drop the name
 	// argument, if it turns out that initialization order is deterministic.
 	if _, ok := fns[name]; ok {
-		panic(fmt.Errorf("already registered: %s", name))
+		panic(fmt.Errorf("%s: already registered", name))
 	}
-	v := reflect.ValueOf(i)
+	v := reflect.ValueOf(fni)
 	t := v.Type()
 	if t.Kind() != reflect.Func {
-		panic(fmt.Errorf("not a function: %v", t.Kind()))
+		panic(fmt.Errorf("%s: not a function: %v", name, t.Kind()))
 	}
 	if t.NumOut() > 1 || t.NumOut() == 1 && t.Out(0) != errorType {
-		panic(fmt.Errorf("function must return an error or nothing"))
+		panic(fmt.Errorf("%s: function must return an error or nothing: %v", name, t))
 	}
 	// Register the function's args with gob. Needed because Shell.Fn() takes
 	// interface{} arguments.
@@ -101,15 +107,15 @@ func encInvocation(name string, args ...interface{}) (string, error) {
 	if err := gob.NewEncoder(buf).Encode(inv); err != nil {
 		return "", fmt.Errorf("failed to encode invocation: %v", err)
 	}
-	// Hex-encode the gob-encoded bytes so that the result can be used as an env
-	// var value.
-	return hex.EncodeToString(buf.Bytes()), nil
+	// Base64-encode the gob-encoded bytes so that the result can be used as an
+	// env var value.
+	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
 // decInvocation decodes an invocation.
 func decInvocation(s string) (name string, args []interface{}, err error) {
 	var inv invocation
-	b, err := hex.DecodeString(s)
+	b, err := base64.StdEncoding.DecodeString(s)
 	if err == nil {
 		err = gob.NewDecoder(bytes.NewReader(b)).Decode(&inv)
 	}
