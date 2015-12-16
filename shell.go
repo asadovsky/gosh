@@ -6,7 +6,7 @@
 // them, wait for them to exit, capture their output streams, pipe messages
 // between them, terminate them (e.g. on SIGINT), and so on.
 //
-// Gosh is meant to be used in situations where you might otherwise be tempted
+// Gosh is meant to be used in situations where one might otherwise be tempted
 // to write a shell script. (Oh my gosh, no more shell scripts!)
 //
 // For usage examples, see shell_test.go and internal/gosh_example/main.go.
@@ -43,7 +43,8 @@ var (
 
 // Shell represents a shell. Not thread-safe.
 type Shell struct {
-	// Err is the most recent error (may be nil).
+	// Err is the most recent error from this Shell or any of its Cmds (may be
+	// nil).
 	Err error
 	// Opts is the Opts struct for this Shell, with default values filled in.
 	Opts Opts
@@ -188,17 +189,15 @@ func (sh *Shell) AddToCleanup(fn func()) {
 
 // Cleanup cleans up all resources (child processes, temporary files and
 // directories) associated with this Shell. It is safe (and recommended) to call
-// Cleanup after a Shell error.
+// Cleanup after a Shell error. It is also safe to call Cleanup multiple times;
+// calls after the first return immediately with no effect.
 func (sh *Shell) Cleanup() {
 	if !sh.calledNewShell {
 		panic(errDidNotCallNewShell)
 	}
 	sh.cleanupMu.Lock()
 	defer sh.cleanupMu.Unlock()
-	if sh.calledCleanup {
-		panic(errAlreadyCalledCleanup)
-	} else {
-		sh.calledCleanup = true
+	if !sh.calledCleanup {
 		sh.cleanup()
 	}
 }
@@ -259,9 +258,6 @@ func newShell(opts Opts) (*Shell, error) {
 		if sh.Opts.BinDir == "" {
 			var err error
 			if sh.Opts.BinDir, err = sh.makeTempDir(); err != nil {
-				// Note: Here and below, we keep sh.calledCleanup false so that clients
-				// with a non-fatal Errorf implementation can safely defer sh.Cleanup()
-				// before checking sh.Err.
 				sh.cleanup()
 				return sh, err
 			}
@@ -282,11 +278,10 @@ func newShell(opts Opts) (*Shell, error) {
 		sh.cleanupMu.Lock()
 		defer sh.cleanupMu.Unlock()
 		if !sh.calledCleanup {
-			sh.calledCleanup = true
 			sh.cleanup()
 		}
 		// Note: We hold cleanupMu during os.Exit(1) so that the main goroutine will
-		// not call Shell.ok() or Shell.Cleanup() and panic before we exit.
+		// not call Shell.Ok() and panic before we exit.
 		os.Exit(1)
 	})
 	return sh, nil
@@ -519,6 +514,7 @@ func (sh *Shell) terminateRunningCmds() {
 }
 
 func (sh *Shell) cleanup() {
+	sh.calledCleanup = true
 	// Terminate all children that are still running. Note, newShell() calls
 	// syscall.Setpgid().
 	pgid, pid := syscall.Getpgrp(), os.Getpid()
