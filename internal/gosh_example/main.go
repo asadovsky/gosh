@@ -11,6 +11,7 @@ import (
 	"github.com/asadovsky/gosh/internal/gosh_example_lib"
 )
 
+// Mirrors TestCmd in shell_test.go.
 func ExampleCmd() {
 	sh := gosh.NewShell(gosh.Opts{})
 	defer sh.Cleanup()
@@ -19,8 +20,7 @@ func ExampleCmd() {
 	binPath := sh.BuildGoPkg("github.com/asadovsky/gosh/internal/gosh_example_server")
 	c := sh.Cmd(binPath)
 	c.Start()
-	c.AwaitReady()
-	addr := c.AwaitVars("Addr")["Addr"]
+	addr := c.AwaitVars("addr")["addr"]
 	fmt.Println(addr)
 
 	// Run client.
@@ -34,6 +34,7 @@ var (
 	serveFunc = gosh.RegisterFunc("serveFunc", lib.Serve)
 )
 
+// Mirrors TestFuncCmd in shell_test.go.
 func ExampleFuncCmd() {
 	sh := gosh.NewShell(gosh.Opts{})
 	defer sh.Cleanup()
@@ -41,8 +42,7 @@ func ExampleFuncCmd() {
 	// Start server.
 	c := sh.FuncCmd(serveFunc)
 	c.Start()
-	c.AwaitReady()
-	addr := c.AwaitVars("Addr")["Addr"]
+	addr := c.AwaitVars("addr")["addr"]
 	fmt.Println(addr)
 
 	// Run client.

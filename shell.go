@@ -55,14 +55,15 @@ type Shell struct {
 	// Args is the list of args to append to subsequent command invocations.
 	Args []string
 	// Internal state.
-	calledNewShell bool
-	dirStack       []string   // for pushd/popd
-	cleanupMu      sync.Mutex // protects the fields below; held during cleanup
-	calledCleanup  bool
-	cmds           []*Cmd
-	tempFiles      []*os.File
-	tempDirs       []string
-	cleanupFuncs   []func()
+	calledNewShell  bool
+	cleanupDone     chan struct{}
+	cleanupMu       sync.Mutex // protects the fields below; held during cleanup
+	calledCleanup   bool
+	cmds            []*Cmd
+	tempFiles       []*os.File
+	tempDirs        []string
+	dirStack        []string // for pushd/popd
+	cleanupHandlers []func()
 }
 
 // Opts configures Shell.
@@ -127,18 +128,17 @@ func (sh *Shell) Wait() {
 	sh.HandleError(sh.wait())
 }
 
-// Rename renames (moves) a file. It's just like os.Rename, but retries once on
-// error.
-func (sh *Shell) Rename(oldpath, newpath string) {
+// Move moves a file.
+func (sh *Shell) Move(oldpath, newpath string) {
 	sh.Ok()
-	sh.HandleError(sh.rename(oldpath, newpath))
+	sh.HandleError(sh.move(oldpath, newpath))
 }
 
 // BuildGoPkg compiles a Go package using the "go build" command and writes the
-// resulting binary to sh.Opts.BinDir. Returns the absolute path to the binary.
-// Included in Shell for convenience, but could have just as easily been
-// provided as a utility function.
+// resulting binary to sh.Opts.BinDir, or to the -o flag location if specified.
+// Returns the absolute path to the binary.
 func (sh *Shell) BuildGoPkg(pkg string, flags ...string) string {
+	// TODO(sadovsky): Convert BuildGoPkg into a utility function.
 	sh.Ok()
 	res, err := sh.buildGoPkg(pkg, flags...)
 	sh.HandleError(err)
@@ -175,10 +175,12 @@ func (sh *Shell) Popd() {
 	sh.HandleError(sh.popd())
 }
 
-// AddToCleanup registers the given function to be called by Shell.Cleanup().
-func (sh *Shell) AddToCleanup(f func()) {
+// AddCleanupHandler registers the given function to be called during cleanup.
+// Cleanup handlers are called in LIFO order, possibly in a separate goroutine
+// spawned by gosh.
+func (sh *Shell) AddCleanupHandler(f func()) {
 	sh.Ok()
-	sh.HandleError(sh.addToCleanup(f))
+	sh.HandleError(sh.addCleanupHandler(f))
 }
 
 // Cleanup cleans up all resources (child processes, temporary files and
@@ -217,16 +219,6 @@ func (sh *Shell) Ok() {
 ////////////////////////////////////////
 // Internals
 
-// onTerminationSignal starts a goroutine that listens for various termination
-// signals and calls the given function when such a signal is received.
-func onTerminationSignal(f func(os.Signal)) {
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
-	go func() {
-		f(<-ch)
-	}()
-}
-
 // Note: On error, newShell returns a *Shell with Opts.Fatalf initialized to
 // simplify things for the caller.
 func newShell(opts Opts) (*Shell, error) {
@@ -253,6 +245,7 @@ func newShell(opts Opts) (*Shell, error) {
 		Opts:           opts,
 		Vars:           shVars,
 		calledNewShell: true,
+		cleanupDone:    make(chan struct{}),
 	}
 	if sh.Opts.BinDir == "" {
 		sh.Opts.BinDir = osVars[envBinDir]
@@ -264,19 +257,34 @@ func newShell(opts Opts) (*Shell, error) {
 			}
 		}
 	}
-	// Call sh.cleanup() if needed when a termination signal is received.
-	onTerminationSignal(func(sig os.Signal) {
-		sh.logf("Received signal: %v\n", sig)
-		sh.cleanupMu.Lock()
-		defer sh.cleanupMu.Unlock()
-		if !sh.calledCleanup {
-			sh.cleanup()
-		}
-		// Note: We hold cleanupMu during os.Exit(1) so that the main goroutine will
-		// not call Shell.Ok() and panic before we exit.
-		os.Exit(1)
-	})
+	sh.cleanupOnSignal()
 	return sh, nil
+}
+
+// cleanupOnSignal starts a goroutine that calls cleanup if a termination signal
+// is received.
+func (sh *Shell) cleanupOnSignal() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	go func() {
+		select {
+		case sig := <-ch:
+			// A termination signal was received; the process will exit.
+			sh.logf("Received signal: %v\n", sig)
+			sh.cleanupMu.Lock()
+			defer sh.cleanupMu.Unlock()
+			if !sh.calledCleanup {
+				sh.cleanup()
+			}
+			// Note: We hold cleanupMu during os.Exit(1) so that the main goroutine
+			// will not call Shell.Ok() and panic before we exit.
+			os.Exit(1)
+		case <-sh.cleanupDone:
+			// The user called sh.Cleanup; stop listening for signals and exit this
+			// goroutine.
+		}
+		signal.Stop(ch)
+	}()
 }
 
 func (sh *Shell) logf(format string, v ...interface{}) {
@@ -322,8 +330,8 @@ func (sh *Shell) funcCmd(f *Func, args ...interface{}) (*Cmd, error) {
 }
 
 func (sh *Shell) wait() error {
-	// Note: It is illegal to call newCmd() concurrently with Shell.wait(), so we
-	// need not hold cleanupMu when accessing sh.cmds below.
+	// Note: It is illegal to call newCmdInternal concurrently with Shell.wait, so
+	// we need not hold cleanupMu when accessing sh.cmds below.
 	var res error
 	for _, c := range sh.cmds {
 		if !c.started || c.calledWait {
@@ -337,45 +345,90 @@ func (sh *Shell) wait() error {
 	return res
 }
 
-func (sh *Shell) rename(oldpath, newpath string) error {
-	if err := os.Rename(oldpath, newpath); err != nil {
+func copyFile(from, to string) error {
+	fi, err := os.Stat(from)
+	if err != nil {
+		return err
+	}
+	in, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(to, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, fi.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(out, in)
+	cerr := out.Close()
+	if err != nil {
+		return err
+	}
+	return cerr
+}
+
+func (sh *Shell) move(oldpath, newpath string) error {
+	var err error
+	if err = os.Rename(oldpath, newpath); err != nil {
 		// Concurrent, same-directory rename operations sometimes fail on certain
 		// filesystems, so we retry once after a random backoff.
 		time.Sleep(time.Duration(rand.Int63n(1000)) * time.Millisecond)
-		if err := os.Rename(oldpath, newpath); err != nil {
-			return err
+		err = os.Rename(oldpath, newpath)
+	}
+	// If the error was a LinkError, try copying the file over.
+	if _, ok := err.(*os.LinkError); !ok {
+		return err
+	}
+	if err := copyFile(oldpath, newpath); err != nil {
+		return err
+	}
+	return os.Remove(oldpath)
+}
+
+func extractOutputFlag(flags ...string) (string, []string) {
+	for i, f := range flags {
+		if f == "-o" && len(flags) > i {
+			return flags[i+1], append(flags[:i], flags[i+2:]...)
 		}
 	}
-	return nil
+	return "", flags
 }
 
 func (sh *Shell) buildGoPkg(pkg string, flags ...string) (string, error) {
+	outputFlag, flags := extractOutputFlag(flags...)
 	binPath := filepath.Join(sh.Opts.BinDir, path.Base(pkg))
+	if outputFlag != "" {
+		if filepath.IsAbs(outputFlag) {
+			binPath = outputFlag
+		} else {
+			binPath = filepath.Join(sh.Opts.BinDir, outputFlag)
+		}
+	}
 	// If this binary has already been built, don't rebuild it.
 	if _, err := os.Stat(binPath); err == nil {
 		return binPath, nil
 	} else if !os.IsNotExist(err) {
 		return "", err
 	}
-	// Build binary to tempBinPath, then move it to binPath.
+	// Build binary to tempBinPath (in a fresh temporary directory), then move it
+	// to binPath.
 	tempDir, err := ioutil.TempDir(sh.Opts.BinDir, "")
 	if err != nil {
 		return "", err
 	}
 	defer os.RemoveAll(tempDir)
 	tempBinPath := filepath.Join(tempDir, path.Base(pkg))
-	args := []string{"build", "-x", "-o", tempBinPath}
+	args := []string{"build", "-o", tempBinPath}
 	args = append(args, flags...)
 	args = append(args, pkg)
 	c, err := sh.cmd(nil, "go", args...)
 	if err != nil {
 		return "", err
 	}
-	c.PropagateOutput = false
 	if err := c.run(); err != nil {
 		return "", err
 	}
-	if err := sh.rename(tempBinPath, binPath); err != nil {
+	if err := sh.move(tempBinPath, binPath); err != nil {
 		return "", err
 	}
 	return binPath, nil
@@ -410,6 +463,11 @@ func (sh *Shell) makeTempDir() (string, error) {
 }
 
 func (sh *Shell) pushd(dir string) error {
+	sh.cleanupMu.Lock()
+	defer sh.cleanupMu.Unlock()
+	if sh.calledCleanup {
+		return errAlreadyCalledCleanup
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -422,6 +480,11 @@ func (sh *Shell) pushd(dir string) error {
 }
 
 func (sh *Shell) popd() error {
+	sh.cleanupMu.Lock()
+	defer sh.cleanupMu.Unlock()
+	if sh.calledCleanup {
+		return errAlreadyCalledCleanup
+	}
 	if len(sh.dirStack) == 0 {
 		return errors.New("gosh: dir stack is empty")
 	}
@@ -433,13 +496,13 @@ func (sh *Shell) popd() error {
 	return nil
 }
 
-func (sh *Shell) addToCleanup(f func()) error {
+func (sh *Shell) addCleanupHandler(f func()) error {
 	sh.cleanupMu.Lock()
 	defer sh.cleanupMu.Unlock()
 	if sh.calledCleanup {
 		return errAlreadyCalledCleanup
 	}
-	sh.cleanupFuncs = append(sh.cleanupFuncs, f)
+	sh.cleanupHandlers = append(sh.cleanupHandlers, f)
 	return nil
 }
 
@@ -515,10 +578,11 @@ func (sh *Shell) cleanup() {
 			sh.logf("os.Chdir(%q) failed: %v\n", dir, err)
 		}
 	}
-	// Call any registered cleanup functions in LIFO order.
-	for i := len(sh.cleanupFuncs) - 1; i >= 0; i-- {
-		sh.cleanupFuncs[i]()
+	// Call cleanup handlers in LIFO order.
+	for i := len(sh.cleanupHandlers) - 1; i >= 0; i-- {
+		sh.cleanupHandlers[i]()
 	}
+	close(sh.cleanupDone)
 }
 
 ////////////////////////////////////////
@@ -546,15 +610,3 @@ func InitMain() {
 	}
 	os.Exit(0)
 }
-
-// NopWriteCloser returns a WriteCloser with a no-op Close method wrapping the
-// provided Writer.
-func NopWriteCloser(w io.Writer) io.WriteCloser {
-	return nopWriteCloser{w}
-}
-
-type nopWriteCloser struct {
-	io.Writer
-}
-
-func (nopWriteCloser) Close() error { return nil }
