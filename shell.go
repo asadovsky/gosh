@@ -24,17 +24,17 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"sync"
 	"syscall"
 	"time"
 )
 
 const (
-	envBinDir         = "GOSH_BIN_DIR"
-	envChildOutputDir = "GOSH_CHILD_OUTPUT_DIR"
-	envExitAfter      = "GOSH_EXIT_AFTER"
-	envInvocation     = "GOSH_INVOCATION"
-	envWatchParent    = "GOSH_WATCH_PARENT"
+	envExitAfter   = "GOSH_EXIT_AFTER"
+	envInvocation  = "GOSH_INVOCATION"
+	envWatchParent = "GOSH_WATCH_PARENT"
 )
 
 var (
@@ -43,19 +43,35 @@ var (
 	errDidNotCallNewShell   = errors.New("gosh: did not call gosh.NewShell")
 )
 
+// TB is a subset of the testing.TB interface, defined here to avoid depending
+// on the testing package.
+type TB interface {
+	FailNow()
+	Logf(format string, args ...interface{})
+}
+
 // Shell represents a shell. Not thread-safe.
 type Shell struct {
-	// Err is the most recent error from this Shell or any of its Cmds (may be
-	// nil).
+	// Err is the most recent error from this Shell or any of its child Cmds (may
+	// be nil).
 	Err error
-	// Opts is the Opts struct for this Shell, with default values filled in.
-	Opts Opts
+	// PropagateChildOutput specifies whether to propagate child stdout and stderr
+	// up to the parent's stdout and stderr.
+	PropagateChildOutput bool
+	// ChildOutputDir, if non-empty, makes it so child stdout and stderr are tee'd
+	// to files in the specified directory.
+	ChildOutputDir string
+	// ContinueOnError specifies whether to invoke TB.FailNow on error, i.e.
+	// whether to panic on error. Users that set ContinueOnError to true should
+	// inspect sh.Err after each Shell method invocation.
+	ContinueOnError bool
 	// Vars is the map of env vars for this Shell.
 	Vars map[string]string
 	// Args is the list of args to append to subsequent command invocations.
 	Args []string
 	// Internal state.
 	calledNewShell  bool
+	tb              TB
 	cleanupDone     chan struct{}
 	cleanupMu       sync.Mutex // protects the fields below; held during cleanup
 	calledCleanup   bool
@@ -66,40 +82,46 @@ type Shell struct {
 	cleanupHandlers []func()
 }
 
-// Opts configures Shell.
-type Opts struct {
-	// Fatalf is called whenever an error is encountered.
-	// If not specified, defaults to panic(fmt.Sprintf(format, v...)).
-	Fatalf func(format string, v ...interface{})
-	// Logf is called to log things.
-	// If not specified, defaults to log.Printf(format, v...).
-	Logf func(format string, v ...interface{})
-	// Child stdout and stderr are propagated up to the parent's stdout and stderr
-	// iff PropagateChildOutput is true.
-	PropagateChildOutput bool
-	// If specified, each child's stdout and stderr streams are also piped to
-	// files in this directory.
-	// If not specified, defaults to GOSH_CHILD_OUTPUT_DIR.
-	ChildOutputDir string
-	// Directory where BuildGoPkg() writes compiled binaries.
-	// If not specified, defaults to GOSH_BIN_DIR.
-	BinDir string
-}
-
-// NewShell returns a new Shell.
-func NewShell(opts Opts) *Shell {
-	sh, err := newShell(opts)
-	sh.HandleError(err)
+// NewShell returns a new Shell. Tests and benchmarks should pass their
+// testing.TB instance; non-tests should pass nil.
+func NewShell(tb TB) *Shell {
+	sh, err := newShell(tb)
+	sh.handleError(err)
 	return sh
 }
 
-// HandleError sets sh.Err. If err is not nil, it also calls sh.Opts.Fatalf.
+// HandleError sets sh.Err. If err is not nil and sh.ContinueOnError is false,
+// it also calls TB.FailNow.
 func (sh *Shell) HandleError(err error) {
+	sh.HandleErrorWithSkip(err, 2)
+}
+
+// handleError is intended for use by public Shell method implementations.
+func (sh *Shell) handleError(err error) {
+	sh.HandleErrorWithSkip(err, 3)
+}
+
+// HandleErrorWithSkip is like HandleError, but allows clients to specify the
+// skip value to pass to runtime.Caller.
+func (sh *Shell) HandleErrorWithSkip(err error, skip int) {
 	sh.Ok()
 	sh.Err = err
-	if err != nil && sh.Opts.Fatalf != nil {
-		sh.Opts.Fatalf("%v", err)
+	if err == nil {
+		return
 	}
+	_, file, line, _ := runtime.Caller(skip)
+	toLog := fmt.Sprintf("%s:%d: %v\n", filepath.Base(file), line, err)
+	if sh.ContinueOnError {
+		sh.tb.Logf(toLog)
+		return
+	}
+	if sh.tb != pkgLevelDefaultTB {
+		sh.tb.Logf(string(debug.Stack()))
+	}
+	// Unfortunately, if FailNow panics, there's no way to make toLog get printed
+	// beneath the stack trace.
+	sh.tb.Logf(toLog)
+	sh.tb.FailNow()
 }
 
 // Cmd returns a Cmd for an invocation of the named program. The given arguments
@@ -107,7 +129,7 @@ func (sh *Shell) HandleError(err error) {
 func (sh *Shell) Cmd(name string, args ...string) *Cmd {
 	sh.Ok()
 	res, err := sh.cmd(nil, name, args...)
-	sh.HandleError(err)
+	sh.handleError(err)
 	return res
 }
 
@@ -118,31 +140,20 @@ func (sh *Shell) Cmd(name string, args ...string) *Cmd {
 func (sh *Shell) FuncCmd(f *Func, args ...interface{}) *Cmd {
 	sh.Ok()
 	res, err := sh.funcCmd(f, args...)
-	sh.HandleError(err)
+	sh.handleError(err)
 	return res
 }
 
 // Wait waits for all commands started by this Shell to exit.
 func (sh *Shell) Wait() {
 	sh.Ok()
-	sh.HandleError(sh.wait())
+	sh.handleError(sh.wait())
 }
 
 // Move moves a file.
 func (sh *Shell) Move(oldpath, newpath string) {
 	sh.Ok()
-	sh.HandleError(sh.move(oldpath, newpath))
-}
-
-// BuildGoPkg compiles a Go package using the "go build" command and writes the
-// resulting binary to sh.Opts.BinDir, or to the -o flag location if specified.
-// Returns the absolute path to the binary.
-func (sh *Shell) BuildGoPkg(pkg string, flags ...string) string {
-	// TODO(sadovsky): Convert BuildGoPkg into a utility function.
-	sh.Ok()
-	res, err := sh.buildGoPkg(pkg, flags...)
-	sh.HandleError(err)
-	return res
+	sh.handleError(sh.move(oldpath, newpath))
 }
 
 // MakeTempFile creates a new temporary file in os.TempDir, opens the file for
@@ -150,7 +161,7 @@ func (sh *Shell) BuildGoPkg(pkg string, flags ...string) string {
 func (sh *Shell) MakeTempFile() *os.File {
 	sh.Ok()
 	res, err := sh.makeTempFile()
-	sh.HandleError(err)
+	sh.handleError(err)
 	return res
 }
 
@@ -159,20 +170,20 @@ func (sh *Shell) MakeTempFile() *os.File {
 func (sh *Shell) MakeTempDir() string {
 	sh.Ok()
 	res, err := sh.makeTempDir()
-	sh.HandleError(err)
+	sh.handleError(err)
 	return res
 }
 
 // Pushd behaves like Bash pushd.
 func (sh *Shell) Pushd(dir string) {
 	sh.Ok()
-	sh.HandleError(sh.pushd(dir))
+	sh.handleError(sh.pushd(dir))
 }
 
 // Popd behaves like Bash popd.
 func (sh *Shell) Popd() {
 	sh.Ok()
-	sh.HandleError(sh.popd())
+	sh.handleError(sh.popd())
 }
 
 // AddCleanupHandler registers the given function to be called during cleanup.
@@ -180,7 +191,7 @@ func (sh *Shell) Popd() {
 // spawned by gosh.
 func (sh *Shell) AddCleanupHandler(f func()) {
 	sh.Ok()
-	sh.HandleError(sh.addCleanupHandler(f))
+	sh.handleError(sh.addCleanupHandler(f))
 }
 
 // Cleanup cleans up all resources (child processes, temporary files and
@@ -219,43 +230,32 @@ func (sh *Shell) Ok() {
 ////////////////////////////////////////
 // Internals
 
-// Note: On error, newShell returns a *Shell with Opts.Fatalf initialized to
-// simplify things for the caller.
-func newShell(opts Opts) (*Shell, error) {
-	osVars := sliceToMap(os.Environ())
-	if opts.Fatalf == nil {
-		opts.Fatalf = func(format string, v ...interface{}) {
-			panic(fmt.Sprintf(format, v...))
-		}
-	}
-	if opts.Logf == nil {
-		opts.Logf = func(format string, v ...interface{}) {
-			log.Printf(format, v...)
-		}
-	}
-	if opts.ChildOutputDir == "" {
-		opts.ChildOutputDir = osVars[envChildOutputDir]
+type defaultTB struct{}
+
+func (*defaultTB) FailNow() {
+	panic(nil)
+}
+
+func (*defaultTB) Logf(format string, args ...interface{}) {
+	log.Printf(format, args...)
+}
+
+var pkgLevelDefaultTB *defaultTB = &defaultTB{}
+
+func newShell(tb TB) (*Shell, error) {
+	if tb == nil {
+		tb = pkgLevelDefaultTB
 	}
 	// Filter out any gosh env vars coming from outside.
-	shVars := copyMap(osVars)
-	for _, key := range []string{envBinDir, envChildOutputDir, envExitAfter, envInvocation, envWatchParent} {
+	shVars := sliceToMap(os.Environ())
+	for _, key := range []string{envExitAfter, envInvocation, envWatchParent} {
 		delete(shVars, key)
 	}
 	sh := &Shell{
-		Opts:           opts,
 		Vars:           shVars,
 		calledNewShell: true,
+		tb:             tb,
 		cleanupDone:    make(chan struct{}),
-	}
-	if sh.Opts.BinDir == "" {
-		sh.Opts.BinDir = osVars[envBinDir]
-		if sh.Opts.BinDir == "" {
-			var err error
-			if sh.Opts.BinDir, err = sh.makeTempDir(); err != nil {
-				sh.cleanup()
-				return sh, err
-			}
-		}
 	}
 	sh.cleanupOnSignal()
 	return sh, nil
@@ -270,7 +270,7 @@ func (sh *Shell) cleanupOnSignal() {
 		select {
 		case sig := <-ch:
 			// A termination signal was received; the process will exit.
-			sh.logf("Received signal: %v\n", sig)
+			sh.tb.Logf("Received signal: %v\n", sig)
 			sh.cleanupMu.Lock()
 			defer sh.cleanupMu.Unlock()
 			if !sh.calledCleanup {
@@ -287,12 +287,6 @@ func (sh *Shell) cleanupOnSignal() {
 	}()
 }
 
-func (sh *Shell) logf(format string, v ...interface{}) {
-	if sh.Opts.Logf != nil {
-		sh.Opts.Logf(format, v...)
-	}
-}
-
 func (sh *Shell) cmd(vars map[string]string, name string, args ...string) (*Cmd, error) {
 	if vars == nil {
 		vars = make(map[string]string)
@@ -301,8 +295,8 @@ func (sh *Shell) cmd(vars map[string]string, name string, args ...string) (*Cmd,
 	if err != nil {
 		return nil, err
 	}
-	c.PropagateOutput = sh.Opts.PropagateChildOutput
-	c.OutputDir = sh.Opts.ChildOutputDir
+	c.PropagateOutput = sh.PropagateChildOutput
+	c.OutputDir = sh.ChildOutputDir
 	return c, nil
 }
 
@@ -330,15 +324,16 @@ func (sh *Shell) funcCmd(f *Func, args ...interface{}) (*Cmd, error) {
 }
 
 func (sh *Shell) wait() error {
-	// Note: It is illegal to call newCmdInternal concurrently with Shell.wait, so
-	// we need not hold cleanupMu when accessing sh.cmds below.
+	// Note: It is illegal to call newCmdInternal (which mutates sh.cmds)
+	// concurrently with Shell.wait, so we need not hold cleanupMu when accessing
+	// sh.cmds below.
 	var res error
 	for _, c := range sh.cmds {
 		if !c.started || c.calledWait {
 			continue
 		}
 		if err := c.wait(); !c.errorIsOk(err) {
-			sh.logf("%s (PID %d) failed: %v\n", c.Path, c.Pid(), err)
+			sh.tb.Logf("%s (PID %d) failed: %v\n", c.Path, c.Pid(), err)
 			res = err
 		}
 	}
@@ -383,55 +378,6 @@ func (sh *Shell) move(oldpath, newpath string) error {
 		return err
 	}
 	return os.Remove(oldpath)
-}
-
-func extractOutputFlag(flags ...string) (string, []string) {
-	for i, f := range flags {
-		if f == "-o" && len(flags) > i {
-			return flags[i+1], append(flags[:i], flags[i+2:]...)
-		}
-	}
-	return "", flags
-}
-
-func (sh *Shell) buildGoPkg(pkg string, flags ...string) (string, error) {
-	outputFlag, flags := extractOutputFlag(flags...)
-	binPath := filepath.Join(sh.Opts.BinDir, path.Base(pkg))
-	if outputFlag != "" {
-		if filepath.IsAbs(outputFlag) {
-			binPath = outputFlag
-		} else {
-			binPath = filepath.Join(sh.Opts.BinDir, outputFlag)
-		}
-	}
-	// If this binary has already been built, don't rebuild it.
-	if _, err := os.Stat(binPath); err == nil {
-		return binPath, nil
-	} else if !os.IsNotExist(err) {
-		return "", err
-	}
-	// Build binary to tempBinPath (in a fresh temporary directory), then move it
-	// to binPath.
-	tempDir, err := ioutil.TempDir(sh.Opts.BinDir, "")
-	if err != nil {
-		return "", err
-	}
-	defer os.RemoveAll(tempDir)
-	tempBinPath := filepath.Join(tempDir, path.Base(pkg))
-	args := []string{"build", "-o", tempBinPath}
-	args = append(args, flags...)
-	args = append(args, pkg)
-	c, err := sh.cmd(nil, "go", args...)
-	if err != nil {
-		return "", err
-	}
-	if err := c.run(); err != nil {
-		return "", err
-	}
-	if err := sh.move(tempBinPath, binPath); err != nil {
-		return "", err
-	}
-	return binPath, nil
 }
 
 func (sh *Shell) makeTempFile() (*os.File, error) {
@@ -528,14 +474,14 @@ func (sh *Shell) terminateRunningCmds() {
 	// Send os.Interrupt first; if that doesn't work, send os.Kill.
 	anyRunning := sh.forEachRunningCmd(func(c *Cmd) {
 		if err := c.signal(os.Interrupt); err != nil {
-			sh.logf("%d.Signal(os.Interrupt) failed: %v\n", c.Pid(), err)
+			sh.tb.Logf("%d.Signal(os.Interrupt) failed: %v\n", c.Pid(), err)
 		}
 	})
 	// If any child is still running, wait for 100ms.
 	if anyRunning {
 		time.Sleep(100 * time.Millisecond)
 		anyRunning = sh.forEachRunningCmd(func(c *Cmd) {
-			sh.logf("%s (PID %d) did not die\n", c.Path, c.Pid())
+			sh.tb.Logf("%s (PID %d) did not die\n", c.Path, c.Pid())
 		})
 	}
 	// If any child is still running, wait for another second, then send os.Kill
@@ -544,10 +490,10 @@ func (sh *Shell) terminateRunningCmds() {
 		time.Sleep(time.Second)
 		sh.forEachRunningCmd(func(c *Cmd) {
 			if err := c.signal(os.Kill); err != nil {
-				sh.logf("%d.Signal(os.Kill) failed: %v\n", c.Pid(), err)
+				sh.tb.Logf("%d.Signal(os.Kill) failed: %v\n", c.Pid(), err)
 			}
 		})
-		sh.logf("Killed all remaining child processes\n")
+		sh.tb.Logf("Killed all remaining child processes\n")
 	}
 }
 
@@ -559,23 +505,23 @@ func (sh *Shell) cleanup() {
 	for _, tempFile := range sh.tempFiles {
 		name := tempFile.Name()
 		if err := tempFile.Close(); err != nil {
-			sh.logf("%q.Close() failed: %v\n", name, err)
+			sh.tb.Logf("%q.Close() failed: %v\n", name, err)
 		}
 		if err := os.RemoveAll(name); err != nil {
-			sh.logf("os.RemoveAll(%q) failed: %v\n", name, err)
+			sh.tb.Logf("os.RemoveAll(%q) failed: %v\n", name, err)
 		}
 	}
 	// Delete all temporary directories.
 	for _, tempDir := range sh.tempDirs {
 		if err := os.RemoveAll(tempDir); err != nil {
-			sh.logf("os.RemoveAll(%q) failed: %v\n", tempDir, err)
+			sh.tb.Logf("os.RemoveAll(%q) failed: %v\n", tempDir, err)
 		}
 	}
 	// Change back to the top of the dir stack.
 	if len(sh.dirStack) > 0 {
 		dir := sh.dirStack[0]
 		if err := os.Chdir(dir); err != nil {
-			sh.logf("os.Chdir(%q) failed: %v\n", dir, err)
+			sh.tb.Logf("os.Chdir(%q) failed: %v\n", dir, err)
 		}
 	}
 	// Call cleanup handlers in LIFO order.
@@ -609,4 +555,79 @@ func InitMain() {
 		log.Fatal(err)
 	}
 	os.Exit(0)
+}
+
+// BuildGoPkg compiles a Go package using the "go build" command and writes the
+// resulting binary to the given binDir, or to the -o flag location if
+// specified. If -o is relative, it is interpreted as relative to binDir. If the
+// binary already exists at the target location, it is not rebuilt. Returns the
+// absolute path to the binary.
+func BuildGoPkg(sh *Shell, binDir, pkg string, flags ...string) string {
+	sh.Ok()
+	res, err := buildGoPkg(sh, binDir, pkg, flags...)
+	sh.handleError(err)
+	return res
+}
+
+func extractOutputFlag(flags ...string) (outputFlag string, otherFlags []string, err error) {
+	for i := 0; i < len(flags); i++ {
+		v := flags[i]
+		if v == "-o" || v == "--o" {
+			i++
+			if i == len(flags) {
+				return "", nil, errors.New("gosh: passed -o without location")
+			}
+			outputFlag = flags[i]
+		} else {
+			otherFlags = append(otherFlags, v)
+		}
+	}
+	return
+}
+
+func buildGoPkg(sh *Shell, binDir, pkg string, flags ...string) (string, error) {
+	outputFlag, flags, err := extractOutputFlag(flags...)
+	if err != nil {
+		return "", err
+	}
+	var binPath string
+	if outputFlag == "" {
+		binPath = filepath.Join(binDir, path.Base(pkg))
+	} else if filepath.IsAbs(outputFlag) {
+		binPath = outputFlag
+	} else {
+		binPath = filepath.Join(binDir, outputFlag)
+	}
+	// If the binary already exists at the target location, don't rebuild it.
+	if _, err := os.Stat(binPath); err == nil {
+		return binPath, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	// Build binary to tempBinPath (in a fresh temporary directory), then move it
+	// to binPath.
+	tempDir, err := ioutil.TempDir(binDir, "")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tempDir)
+	tempBinPath := filepath.Join(tempDir, path.Base(pkg))
+	args := []string{"build", "-o", tempBinPath}
+	args = append(args, flags...)
+	args = append(args, pkg)
+	c, err := sh.cmd(nil, "go", args...)
+	if err != nil {
+		return "", err
+	}
+	if err := c.run(); err != nil {
+		return "", err
+	}
+	// Create target directory, if needed.
+	if err := os.MkdirAll(filepath.Dir(binPath), 0700); err != nil {
+		return "", err
+	}
+	if err := sh.move(tempBinPath, binPath); err != nil {
+		return "", err
+	}
+	return binPath, nil
 }

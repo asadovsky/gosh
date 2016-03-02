@@ -13,18 +13,19 @@ import (
 
 // Mirrors TestCmd in shell_test.go.
 func ExampleCmd() {
-	sh := gosh.NewShell(gosh.Opts{})
+	sh := gosh.NewShell(nil)
 	defer sh.Cleanup()
 
 	// Start server.
-	binPath := sh.BuildGoPkg("github.com/asadovsky/gosh/internal/gosh_example_server")
+	binDir := sh.MakeTempDir()
+	binPath := gosh.BuildGoPkg(sh, binDir, "github.com/asadovsky/gosh/internal/gosh_example_server")
 	c := sh.Cmd(binPath)
 	c.Start()
 	addr := c.AwaitVars("addr")["addr"]
 	fmt.Println(addr)
 
 	// Run client.
-	binPath = sh.BuildGoPkg("github.com/asadovsky/gosh/internal/gosh_example_client")
+	binPath = gosh.BuildGoPkg(sh, binDir, "github.com/asadovsky/gosh/internal/gosh_example_client")
 	c = sh.Cmd(binPath, "-addr="+addr)
 	fmt.Print(c.Stdout())
 }
@@ -36,7 +37,7 @@ var (
 
 // Mirrors TestFuncCmd in shell_test.go.
 func ExampleFuncCmd() {
-	sh := gosh.NewShell(gosh.Opts{})
+	sh := gosh.NewShell(nil)
 	defer sh.Cleanup()
 
 	// Start server.
