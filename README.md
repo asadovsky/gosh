@@ -20,7 +20,7 @@ GoDoc: https://godoc.org/github.com/asadovsky/gosh
     mkdir -p vendor/v.io/x/lib/lookpath
     rsync -r $SRCDIR/src/v.io/x/lib/lookpath/ ./vendor/v.io/x/lib/lookpath/
 
-    GO15VENDOREXPERIMENT=1
+    export GO15VENDOREXPERIMENT=1
     go test github.com/asadovsky/gosh/...
     go vet github.com/asadovsky/gosh/...
     git add -A && git commit -m "pull $HEAD" && git push
