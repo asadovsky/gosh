@@ -150,12 +150,11 @@ func (sh *Shell) Wait() {
 	sh.handleError(sh.wait())
 }
 
-// Move moves a file from 'oldpath' to 'newpath'. It first attempts an atomic
-// rename, using os.Rename; if that fails, it copies 'oldpath' to 'newpath',
-// then deletes 'oldpath'. Requires that 'newpath' does not exist, and that the
-// parent directory of 'newpath' does exist. Currently only supports moving an
-// individual file; moving a directory is not yet supported, but may be in the
-// future.
+// Move moves a file from 'oldpath' to 'newpath'. It first attempts os.Rename;
+// if that fails, it copies 'oldpath' to 'newpath', then deletes 'oldpath'.
+// Requires that 'newpath' does not exist, and that the parent directory of
+// 'newpath' does exist. Currently only supports moving an individual file;
+// moving a directory is not yet supported.
 func (sh *Shell) Move(oldpath, newpath string) {
 	sh.Ok()
 	sh.handleError(sh.move(oldpath, newpath))
@@ -560,6 +559,9 @@ var calledInitMain = false
 // parent process, it returns immediately with no effect. In a child process for
 // a Shell.FuncCmd command, it runs the specified function, then exits.
 func InitMain() {
+	if calledInitMain {
+		panic("gosh: already called gosh.InitMain")
+	}
 	calledInitMain = true
 	s := os.Getenv(envInvocation)
 	if s == "" {
