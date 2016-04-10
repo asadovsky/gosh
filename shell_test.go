@@ -18,12 +18,15 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -868,6 +871,36 @@ func TestSignal(t *testing.T) {
 	c := sh.FuncCmd(sleepFunc, time.Duration(0), 0)
 	c.Run()
 	setsErr(t, sh, func() { c.Signal(os.Interrupt) })
+}
+
+var processGroup = gosh.RegisterFunc("processGroup", func(n int) {
+	pids := make([]string, n)
+	for x := 0; x < n; x++ {
+		c := exec.Command("sleep", "3600")
+		c.Start()
+		pids[x] = strconv.Itoa(c.Process.Pid)
+	}
+	gosh.SendVars(map[string]string{"pids": strings.Join(pids, ",")})
+	time.Sleep(time.Minute)
+})
+
+func TestCleanupProcessGroup(t *testing.T) {
+	sh := gosh.NewShell(t)
+	defer sh.Cleanup()
+
+	c := sh.FuncCmd(processGroup, 5)
+	c.Start()
+	pids := c.AwaitVars("pids")["pids"]
+	c.Signal(os.Interrupt)
+
+	// Wait for all processes in the child's process group to exit.
+	for syscall.Kill(-c.Pid(), 0) != syscall.ESRCH {
+		time.Sleep(100 * time.Millisecond)
+	}
+	for _, pid := range strings.Split(pids, ",") {
+		p, _ := strconv.Atoi(pid)
+		eq(t, syscall.Kill(p, 0), syscall.ESRCH)
+	}
 }
 
 func TestTerminate(t *testing.T) {
